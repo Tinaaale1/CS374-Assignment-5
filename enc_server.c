@@ -10,7 +10,7 @@
 
 #define MAX_MESSAGE_SIZE 100000
 #define BUFFER_SIZE 1024
-#define MAX_CHILDREN 5  // Limit how many simultaneous connections the server accepts/forks at a time 
+#define MAX_CHILDREN 5  // Limits how many simultaneous connections the server accepts/forks at a time 
 
 // Helper function to print error message and then exit the program
 void error(const char *msg) {
@@ -94,7 +94,7 @@ void handleClient(int connectionFD) {
     while (totalReceived < size) {
         memset(buffer, 0, BUFFER_SIZE);
         int received = recv(connectionFD, buffer, BUFFER_SIZE - 1, 0);
-        // Checks if teh recv called failed 
+        // Checks if the recv called failed 
         if (received < 0) {
             fprintf(stderr, "ERROR reading from socket\n");
             close(connectionFD);
@@ -156,10 +156,10 @@ int main(int argc, char *argv[]) {
     // Converts the first command line argument to an integer
     // The integer is the port number the server will listen on
     portNumber = atoi(argv[1]);
-    // Sets teh address family to IPv4
+    // Sets the address family to IPv4
     serverAddress.sin_family = AF_INET;
     // Sets the port number for the socket
-    // htons converts teh port number from host byte order to network byte order (big-endian)
+    // htons converts the port number from host byte order to network byte order (big-endian)
     serverAddress.sin_port = htons(portNumber);
     // Sets the IP address for the socket ot listen on 
     // INADDR_ANY means the server will accept connections on any ofthe host's network interfaces
@@ -183,7 +183,7 @@ int main(int argc, char *argv[]) {
 
     // The server will run indefinitely until manually stopped
     while (1) {
-        // Checks for any termianted child processes
+        // Checks for any terminated child processes
         while (activeChildren > 0) {
             pid_t pid = waitpid(-1, NULL, WNOHANG);
             if (pid <= 0) {
