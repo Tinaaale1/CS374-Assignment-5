@@ -40,7 +40,7 @@ void decrypt(char *ciphertext, const char *key) {
         int cVal = charToInt(ciphertext[i]);
         int kVal = charToInt(key[i]);
         int dVal = (cVal - kVal + 27) % 27;  // Add 27 to avoid negative results
-        ciphertext[i] = intToChar(dVal;
+        ciphertext[i] = intToChar(dVal);
     }
 }
 
