@@ -7,6 +7,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/wait.h>
+
 
 #define MAX_MESSAGE_SIZE 100000
 #define BUFFER_SIZE 1024
