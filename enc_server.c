@@ -9,7 +9,7 @@
 #include <signal.h>
 
 //#define MAX_BUFFER 100000
-//#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 1024
 //#define MAX_CHILDREN 5  // Limits how many simultaneous connections the server accepts/forks at a time 
 
 // Helper function to print error message and then exit the program
