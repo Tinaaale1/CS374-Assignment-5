@@ -7,9 +7,10 @@
 #include <netinet/in.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include <ctype.h>
 
+//#define MAX_BUFFER 100000
 #define BUFFER_SIZE 1024
+//#define MAX_CHILDREN 5  // Limits how many simultaneous connections the server accepts/forks at a time 
 
 // Helper function to print error message and then exit the program
 void error(const char *msg) {
@@ -37,7 +38,7 @@ char intToChar(int val) {
     }
 }
 
-// Encryption function
+
 void encrypt(char* message, char* key, int length) {
     for (int i = 0; i < length; i++) {
         int sum = charToInt(message[i]) + charToInt(key[i]);
@@ -46,34 +47,10 @@ void encrypt(char* message, char* key, int length) {
     message[length] = '\0'; // Null terminate after encryption
 }
 
-// SIGCHLD handler to reap zombie children immediately
-void reap_zombie(int sig) {
-    (void)sig; // suppress unused parameter warning
-    while (waitpid(-1, NULL, WNOHANG) > 0);
-}
-
-// Trim newline and whitespace from end of string (in place)
-void trim_newline(char *str) {
-    int len = strlen(str);
-    while (len > 0 && (str[len-1] == '\n' || str[len-1] == '\r' || isspace(str[len-1]))) {
-        str[len-1] = '\0';
-        len--;
-    }
-}
-
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s port\n", argv[0]);
         exit(1);
-    }
-
-    // Set up SIGCHLD handler to avoid zombies
-    struct sigaction sa;
-    sa.sa_handler = reap_zombie;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        error("sigaction");
     }
 
     int listenSocketFD, establishedConnectionFD;
@@ -109,17 +86,13 @@ int main(int argc, char *argv[]) {
         } 
         else if (pid == 0) {
             // Child process handles the client
+
             char buffer[BUFFER_SIZE];
             memset(buffer, 0, BUFFER_SIZE);
 
             // Step 1: Read client identification string ("otp_enc")
             int n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-            if (n < 0) {
-                close(establishedConnectionFD);
-                error("ERROR reading from socket");
-            }
-            buffer[n] = '\0';
-            trim_newline(buffer);
+            if (n < 0) error("ERROR reading from socket");
 
             if (strcmp(buffer, "otp_enc") != 0) {
                 send(establishedConnectionFD, "no", 2, 0);
@@ -132,12 +105,7 @@ int main(int argc, char *argv[]) {
             // Step 2: Receive message length as string
             memset(buffer, 0, BUFFER_SIZE);
             n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-            if (n < 0) {
-                close(establishedConnectionFD);
-                error("ERROR reading from socket");
-            }
-            buffer[n] = '\0';
-            trim_newline(buffer);
+            if (n < 0) error("ERROR reading from socket");
             int messageLength = atoi(buffer);
             if (messageLength <= 0) {
                 close(establishedConnectionFD);
@@ -149,25 +117,17 @@ int main(int argc, char *argv[]) {
 
             // Step 3: Receive message data fully
             char *message = malloc(messageLength + 1);
-            if (!message) {
-                close(establishedConnectionFD);
-                error("Memory allocation failed");
-            }
+            if (!message) error("Memory allocation failed");
             int totalReceived = 0;
             while (totalReceived < messageLength) {
                 memset(buffer, 0, BUFFER_SIZE);
-                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE, 0);
-                if (n <= 0) {
+                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
+                if (n < 0) {
                     free(message);
-                    close(establishedConnectionFD);
                     error("ERROR reading from socket");
                 }
-                int toCopy = n;
-                if (totalReceived + toCopy > messageLength) {
-                    toCopy = messageLength - totalReceived;
-                }
-                memcpy(message + totalReceived, buffer, toCopy);
-                totalReceived += toCopy;
+                memcpy(message + totalReceived, buffer, n);
+                totalReceived += n;
             }
             message[messageLength] = '\0';
 
@@ -175,25 +135,19 @@ int main(int argc, char *argv[]) {
             char *key = malloc(messageLength + 1);
             if (!key) {
                 free(message);
-                close(establishedConnectionFD);
                 error("Memory allocation failed");
             }
             totalReceived = 0;
             while (totalReceived < messageLength) {
                 memset(buffer, 0, BUFFER_SIZE);
-                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE, 0);
-                if (n <= 0) {
+                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
+                if (n < 0) {
                     free(message);
                     free(key);
-                    close(establishedConnectionFD);
                     error("ERROR reading from socket");
                 }
-                int toCopy = n;
-                if (totalReceived + toCopy > messageLength) {
-                    toCopy = messageLength - totalReceived;
-                }
-                memcpy(key + totalReceived, buffer, toCopy);
-                totalReceived += toCopy;
+                memcpy(key + totalReceived, buffer, n);
+                totalReceived += n;
             }
             key[messageLength] = '\0';
 
@@ -208,7 +162,6 @@ int main(int argc, char *argv[]) {
                 if (n < 0) {
                     free(message);
                     free(key);
-                    close(establishedConnectionFD);
                     error("ERROR writing to socket");
                 }
                 totalSent += n;
@@ -220,9 +173,9 @@ int main(int argc, char *argv[]) {
             close(establishedConnectionFD);
             exit(0); // Child terminates after serving client
         } else {
-            // Parent process closes connection (child handles communication)
+            // Parent process closes connection and waits for child cleanup
             close(establishedConnectionFD);
-            // Reaping children handled by SIGCHLD handler
+            waitpid(-1, NULL, WNOHANG);
         }
     }
 
