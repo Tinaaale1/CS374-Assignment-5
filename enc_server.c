@@ -30,7 +30,7 @@ int charToInt(char c) {
 }
 
 // Converts an integer in the range 0-26 back to character 
-char mapIntToChar(int val) {
+char intToChar(int val) {
     if (val == 26) {
         return ' ';
     } else {
