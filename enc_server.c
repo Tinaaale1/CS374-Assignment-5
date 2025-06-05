@@ -5,10 +5,10 @@
 #include <ctype.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include 
-#include 
-#include 
-
+#include <netinet/in.h>   // For sockaddr_in and htons
+#include <arpa/inet.h>    // For inet_addr, not mandatory here but often used
+#include <sys/wait.h>     // For waitpid and handling child processes
+#include <signal.h>       // For signal handling (optional but useful)
 #define MAX_MSG_SIZE 150000
 
 // Helper function to check valid characters (A-Z and space)
