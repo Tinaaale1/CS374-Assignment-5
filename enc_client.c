@@ -9,6 +9,7 @@
 
 #define BUFFER_SIZE 1024
 
+// Function to check if the input text contains only valid characters (A-Z and space)
 int is_valid_text(const char* text) {
     for (int i = 0; text[i] != '\0'; i++) {
         if (text[i] != ' ' && !(text[i] >= 'A' && text[i] <= 'Z')) {
@@ -16,20 +17,6 @@ int is_valid_text(const char* text) {
         }
     }
     return 1;
-}
-
-// Read from socket until newline or max_len-1 chars
-ssize_t recv_until_newline(int sockfd, char *buf, size_t max_len) {
-    size_t total = 0;
-    while (total < max_len - 1) {
-        char c;
-        ssize_t n = recv(sockfd, &c, 1, 0);
-        if (n <= 0) return n;
-        if (c == '\n') break;
-        buf[total++] = c;
-    }
-    buf[total] = '\0';
-    return total;
 }
 
 int main(int argc, char *argv[]) {
@@ -42,39 +29,44 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Read plaintext file
+    // Open plaintext file
     int plainfd = open(argv[1], O_RDONLY);
     if (plainfd < 0) {
         fprintf(stderr, "enc_client error: input contains bad characters\n");
         exit(1);
     }
-    char plaintext[BUFFER_SIZE * 10] = {0};
+
+    // Read plaintext into buffer
+    char plaintext[BUFFER_SIZE * 10] = {0};  // adjust size if needed
     ssize_t plain_len = read(plainfd, plaintext, sizeof(plaintext) - 1);
     if (plain_len < 0) {
         fprintf(stderr, "enc_client error: input contains bad characters\n");
         close(plainfd);
         exit(1);
     }
-    close(plainfd);
     plaintext[plain_len] = '\0';
+    close(plainfd);
 
+    // Remove trailing newline and carriage return if present
+    while (plain_len > 0 && (plaintext[plain_len - 1] == '\n' || plaintext[plain_len - 1] == '\r')) {
+        plaintext[plain_len - 1] = '\0';
+        plain_len--;
+    }
+
+    // Validate plaintext characters
     if (!is_valid_text(plaintext)) {
         fprintf(stderr, "enc_client error: input contains bad characters\n");
         exit(1);
     }
 
-    // Remove trailing newline
-    if (plain_len > 0 && plaintext[plain_len - 1] == '\n') {
-        plaintext[plain_len - 1] = '\0';
-        plain_len--;
-    }
-
-    // Read key file
+    // Open key file
     int keyfd = open(argv[2], O_RDONLY);
     if (keyfd < 0) {
         fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
         exit(1);
     }
+
+    // Read key into buffer
     char key[BUFFER_SIZE * 10] = {0};
     ssize_t key_len = read(keyfd, key, sizeof(key) - 1);
     if (key_len < 0) {
@@ -82,19 +74,28 @@ int main(int argc, char *argv[]) {
         close(keyfd);
         exit(1);
     }
-    close(keyfd);
     key[key_len] = '\0';
+    close(keyfd);
 
-    if (key_len > 0 && key[key_len - 1] == '\n') {
+    // Remove trailing newline and carriage return from key if present
+    while (key_len > 0 && (key[key_len - 1] == '\n' || key[key_len - 1] == '\r')) {
         key[key_len - 1] = '\0';
         key_len--;
     }
 
+    // Validate key characters
+    if (!is_valid_text(key)) {
+        fprintf(stderr, "Error: key '%s' contains bad characters\n", argv[2]);
+        exit(1);
+    }
+
+    // Check key length against plaintext length
     if (key_len < plain_len) {
         fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
         exit(1);
     }
 
+    // Setup socket connection to server
     portnum = atoi(argv[3]);
     clientsockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (clientsockfd < 0) {
@@ -118,61 +119,55 @@ int main(int argc, char *argv[]) {
         exit(2);
     }
 
-    // Send authorization string with newline
-    char auth_msg[] = "enc_d_bs\n";
-    if (send(clientsockfd, auth_msg, strlen(auth_msg), 0) < 0) {
+    // Send authorization message to server
+    char auth_msg[] = "enc_d_bs"; // Authorization string expected by server
+    ssize_t sent = send(clientsockfd, auth_msg, strlen(auth_msg), 0);
+    if (sent < 0) {
         fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
         exit(2);
     }
 
-    char auth_response[50];
-    ssize_t n = recv_until_newline(clientsockfd, auth_response, sizeof(auth_response));
-    if (n <= 0) {
+    // Wait for server response to authorization
+    char auth_response[20] = {0};
+    ssize_t recvd = recv(clientsockfd, auth_response, sizeof(auth_response) - 1, 0);
+    if (recvd < 0) {
         fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
         exit(2);
     }
+    auth_response[recvd] = '\0';
 
     if (strcmp(auth_response, "enc_d_bs") != 0) {
         fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
         exit(2);
     }
 
-    // Send plaintext + newline
-    char *plaintext_with_newline = malloc(plain_len + 2);
-    memcpy(plaintext_with_newline, plaintext, plain_len);
-    plaintext_with_newline[plain_len] = '\n';
-    plaintext_with_newline[plain_len + 1] = '\0';
-
-    if (send(clientsockfd, plaintext_with_newline, plain_len + 1, 0) < 0) {
-        free(plaintext_with_newline);
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-    free(plaintext_with_newline);
-
-    // Send key (only plaintext length) + newline
-    char *key_with_newline = malloc(plain_len + 2);
-    memcpy(key_with_newline, key, plain_len);
-    key_with_newline[plain_len] = '\n';
-    key_with_newline[plain_len + 1] = '\0';
-
-    if (send(clientsockfd, key_with_newline, plain_len + 1, 0) < 0) {
-        free(key_with_newline);
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-    free(key_with_newline);
-
-    // Receive encrypted message until newline
-    char ciphertext[BUFFER_SIZE * 20];
-    n = recv_until_newline(clientsockfd, ciphertext, sizeof(ciphertext));
-    if (n <= 0) {
+    // Send plaintext to server
+    sent = send(clientsockfd, plaintext, plain_len, 0);
+    if (sent < 0) {
         fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
         exit(2);
     }
 
+    // Send key to server (only send plaintext length bytes)
+    sent = send(clientsockfd, key, plain_len, 0);
+    if (sent < 0) {
+        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
+        exit(2);
+    }
+
+    // Receive encrypted ciphertext from server
+    char ciphertext[BUFFER_SIZE * 20] = {0};
+    recvd = recv(clientsockfd, ciphertext, sizeof(ciphertext) - 1, 0);
+    if (recvd < 0) {
+        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
+        exit(2);
+    }
+    ciphertext[recvd] = '\0';
+
+    // Output ciphertext (exactly as expected, no extra messages)
     printf("%s\n", ciphertext);
 
     close(clientsockfd);
+
     return 0;
 }
