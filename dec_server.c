@@ -117,32 +117,40 @@ int main(int argc, char *argv[]) {
             char buffer[BUFFER_SIZE];
             memset(buffer, 0, sizeof(buffer));
 
-            char *keyStart = NULL;
-            int bytes_remaining = sizeof(buffer);
-            char *p = buffer;
-            int newlines = 0;
-
-            // Read client authentication string
+            // --- Read authorization string ---
             char clientAuth[32];
             memset(clientAuth, 0, sizeof(clientAuth));
-            if (read(newsockfd, clientAuth, sizeof(clientAuth) - 1) < 0) {
+            ssize_t authRead = read(newsockfd, clientAuth, sizeof(clientAuth) - 1);
+            if (authRead < 0) {
                 perror("dec_server: ERROR reading auth");
                 exit(1);
+            }
+            // Trim trailing newline or carriage return
+            for (ssize_t i = 0; i < authRead; i++) {
+                if (clientAuth[i] == '\n' || clientAuth[i] == '\r') {
+                    clientAuth[i] = '\0';
+                    break;
+                }
             }
 
             if (strcmp(clientAuth, "dec_bs") != 0) {
                 char response[] = "invalid";
-                write(newsockfd, response, sizeof(response));
+                write(newsockfd, response, strlen(response));
                 exit(2);
             } else {
                 char response[] = "dec_d_bs";
-                write(newsockfd, response, sizeof(response));
+                write(newsockfd, response, strlen(response));
             }
 
-            // Read ciphertext and key until two newlines are found
-            int bytesRead;
+            // --- Read ciphertext and key until two newlines are found ---
+            char *keyStart = NULL;
+            int bytes_remaining = sizeof(buffer);
+            char *p = buffer;
+            int newlines = 0;
+            ssize_t bytesRead;
+
             while ((bytesRead = read(newsockfd, p, bytes_remaining)) > 0) {
-                for (int i = 0; i < bytesRead; i++) {
+                for (ssize_t i = 0; i < bytesRead; i++) {
                     if (p[i] == '\n') {
                         newlines++;
                         if (newlines == 1) {
@@ -163,24 +171,34 @@ int main(int argc, char *argv[]) {
                 exit(1);
             }
 
-            // Separate message and key
+            // Separate ciphertext and key strings
             char message[BUFFER_SIZE], key[BUFFER_SIZE];
             memset(message, 0, sizeof(message));
             memset(key, 0, sizeof(key));
 
-            int msgLen = keyStart - buffer - 1; // exclude newline before key
+            if (keyStart == NULL) {
+                fprintf(stderr, "dec_server: ERROR input missing key\n");
+                exit(1);
+            }
+
+            int msgLen = (int)(keyStart - buffer - 1); // exclude newline before key
             if (msgLen < 0) {
                 fprintf(stderr, "dec_server: ERROR parsing input\n");
                 exit(1);
             }
 
             strncpy(message, buffer, msgLen);
+            message[msgLen] = '\0'; // null terminate message
             strcpy(key, keyStart);
 
             int keyLen = strlen(key);
-            if (key[keyLen - 1] == '\n') keyLen--;
+            // Remove trailing newline from key if present
+            if (keyLen > 0 && key[keyLen - 1] == '\n') {
+                key[keyLen - 1] = '\0';
+                keyLen--;
+            }
 
-            // Validate message chars
+            // Validate ciphertext chars
             for (int i = 0; i < msgLen; i++) {
                 if (!isValidChar(message[i])) {
                     fprintf(stderr, "dec_server: ERROR invalid char in ciphertext\n");
@@ -195,21 +213,28 @@ int main(int argc, char *argv[]) {
                 }
             }
 
+            // Check key length
             if (keyLen < msgLen) {
                 fprintf(stderr, "dec_server: ERROR key shorter than ciphertext\n");
                 exit(1);
             }
 
+            // Perform decryption
             decrypt(message, key);
 
-            // Write decrypted message back - only write strlen bytes (no trailing nulls)
-            write(newsockfd, message, strlen(message));
+            // Write decrypted message back to client (no trailing nulls)
+            ssize_t written = write(newsockfd, message, strlen(message));
+            if (written < 0) {
+                perror("dec_server: ERROR writing to socket");
+                exit(1);
+            }
 
             close(newsockfd);
             exit(0);
         } else {
             // Parent process
             activeConnections++;
+            // Reap any finished child processes to reduce activeConnections
             while (waitpid(-1, NULL, WNOHANG) > 0) {
                 activeConnections--;
             }
