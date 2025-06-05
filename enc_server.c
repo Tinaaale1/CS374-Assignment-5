@@ -11,7 +11,7 @@
 #define BUFFER_SIZE 100000
 #define MAX_CONNECTIONS 5
 
-// Call errors and terminat the program
+// Call errors and terminate the program
 void error(const char *msg) {
     perror(msg);
     exit(1);
