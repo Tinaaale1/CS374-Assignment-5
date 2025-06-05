@@ -97,8 +97,8 @@ int main(int argc, char *argv[]) {
         exit(2);
     }
 
-    // Authentication handshake for dec_client
-    char auth[] = "dec_bs";   // Must match dec_server's expected auth string
+    // Authentication handshake for dec_client with newline
+    char auth[] = "dec_bs\n";   // Must match dec_server's expected auth string
     if (write(clientsockfd, auth, strlen(auth)) < 0) {
         fprintf(stderr, "Client: ERROR writing auth\n");
         exit(1);
@@ -145,11 +145,22 @@ int main(int argc, char *argv[]) {
     }
     close(fd);
 
-    // Send ciphertext file
+    // Send ciphertext file, then newline
     sendFile(argv[1], clientsockfd);
+    if (write(clientsockfd, "\n", 1) < 0) {
+        fprintf(stderr, "Client: ERROR writing newline after ciphertext\n");
+        exit(1);
+    }
 
-    // Send key file
+    // Send key file, then newline
     sendFile(argv[2], clientsockfd);
+    if (write(clientsockfd, "\n", 1) < 0) {
+        fprintf(stderr, "Client: ERROR writing newline after key\n");
+        exit(1);
+    }
+
+    // Signal end of transmission (no more writes)
+    shutdown(clientsockfd, SHUT_WR);
 
     // Receive decrypted plaintext from server
     memset(buffer, 0, sizeof(buffer));
