@@ -5,180 +5,227 @@
 #include <sys/types.h> 
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sys/wait.h>
 #include <signal.h>
+#include <sys/wait.h>
 
-//#define MAX_BUFFER 100000
-#define BUFFER_SIZE 1024
-//#define MAX_CHILDREN 5  // Limits how many simultaneous connections the server accepts/forks at a time 
+#define BUFFER_SIZE 100000
+#define MAX_CONNECTIONS 5
 
-// Helper function to print error message and then exit the program
+// Call errors and terminat the program
 void error(const char *msg) {
     perror(msg);
-    exit(EXIT_FAILURE);
+    exit(1);
 }
 
-// Converts a character into an integer value between 0 and 26
+// Converts a character to its corresponding integer value 
 int charToInt(char c) {
+    int value = c - 'A';
     if (c == ' ') {
-        return 26;
-    } else if (c >= 'A' && c <= 'Z') {
-        return c - 'A';
-    } else {
-        return 0; 
+        value = 26;
     }
+    return value;
 }
 
-// Converts an integer in the range 0-26 back to character 
-char intToChar(int val) {
-    if (val == 26) {
-        return ' ';
+// Converts an integer back to its corresponding character
+char intToChar(int i) {
+    char c;
+    if (i == 26) {
+        c = ' ';
     } else {
-        return val + 'A';
+        c = i + 'A';
     }
+    return c;
 }
 
-
-void encrypt(char* message, char* key, int length) {
-    for (int i = 0; i < length; i++) {
-        int sum = charToInt(message[i]) + charToInt(key[i]);
-        message[i] = intToChar(sum % 27);
+// Checks if a character is valid (Uppercase or space)
+int isValidChar(char c) {
+    if (c == ' ') {
+        return 1;
     }
-    message[length] = '\0'; // Null terminate after encryption
+    if (c >= 'A' && c <= 'Z') {
+        return 1;
+    }
+    return 0;
+}
+
+void encrypt(char message[], char key[]) {
+    int i;
+    // Loop through message until reach newline
+    for (i = 0; message[i] != '\n'; i++) {
+        // Convert message character to integer
+        int mVal = charToInt(message[i]);   
+        // Convert key character to integer
+        int kVal = charToInt(key[i]);
+        // Add and modulo 27 and then convert back to character
+        message[i] = intToChar((mVal + kVal) % 27);
+    }
+    // Replace newline with string terminator
+    message[i] = '\0';  
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s port\n", argv[0]);
-        exit(1);
+    int sockfd, newsockfd, portnum, optval;
+    // sockfd is the file descriptor for the server
+    // newsockfd is the socket for accepted client connections 
+    // portnum is the port number to listen on 
+    // optval is to hold the value of a socket option to set 
+    socklen_t clientlen;
+    struct sockaddr_in server_addr, client_addr;
+    // Checks if the user provided one argument, the port
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    int listenSocketFD, establishedConnectionFD;
-    struct sockaddr_in serverAddress, clientAddress;
-    socklen_t clientLen;
-    int portNumber = atoi(argv[1]);
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+        error("enc_server: ERROR opening socket");
+    // Set socket option to 1 to allow resuse of port 
+    optval = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
 
-    // Set up server address struct
-    memset(&serverAddress, 0, sizeof(serverAddress));
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(portNumber);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
-
-    // Create socket
-    listenSocketFD = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenSocketFD < 0) error("ERROR opening socket");
-
-    // Bind socket to port
-    if (bind(listenSocketFD, (struct sockaddr *) &serverAddress, sizeof(serverAddress)) < 0)
-        error("ERROR on binding");
-
-    // Listen for connections
-    listen(listenSocketFD, 5);
-
+    memset(&server_addr, 0, sizeof(server_addr));
+    // Converts port number from string to integer
+    portnum = atoi(argv[1]);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    // Converted to network byte order by htons
+    server_addr.sin_port = htons(portnum);
+    // Associates the socket with the address and port specified 
+    if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+        error("enc_server: ERROR on binding");
+    // Allows up 5 queued connections waiting 
+    listen(sockfd, MAX_CONNECTIONS);
+    // Initialize counter to keep track of connected clients 
+    int activeConnections = 0;
+    // Loop to accept new client connections 
     while (1) {
-        clientLen = sizeof(clientAddress);
-        establishedConnectionFD = accept(listenSocketFD, (struct sockaddr *) &clientAddress, &clientLen);
-        if (establishedConnectionFD < 0) error("ERROR on accept");
+        // Size of the client address structure
+        clientlen = sizeof(client_addr);
+        // Waits for a client connection
+        // Returns a new socket file descriptor 
+        newsockfd = accept(sockfd, (struct sockaddr*)&client_addr, &clientlen);
+        
+        // If failed print error and continue to loop 
+        if (newsockfd < 0) {
+            fprintf(stderr, "enc_server: ERROR on accept\n");
+            continue;
+        }
 
+        // If server has 5 active client, wait until a child process finishes to accept more
+        while (activeConnections >= MAX_CONNECTIONS) {
+            pause();  // Wait for child to finish
+        }
+        // Create a new process to handle the client connection separately
         pid_t pid = fork();
+        // If failed print error and close the client socket and continue accepting other connections
         if (pid < 0) {
-            error("ERROR on fork");
-        } 
-        else if (pid == 0) {
-            // Child process handles the client
+            fprintf(stderr, "enc_server: ERROR forking\n");
+            close(newsockfd);
+            continue;
+        }
 
+        if (pid == 0) {
+            // Child process closees the listening socket 
+            close(sockfd);
             char buffer[BUFFER_SIZE];
-            memset(buffer, 0, BUFFER_SIZE);
+            memset(buffer, 0, sizeof(buffer));
+            // Where the key starts in the buffer
+            char *keyStart;
+            // Keeps track of how much space is left in the buffer
+            int bytes_remaining = sizeof(buffer);
+            char *p = buffer;
+            int newlines = 0;
 
-            // Step 1: Read client identification string ("otp_enc")
-            int n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-            if (n < 0) error("ERROR reading from socket");
-
-            if (strcmp(buffer, "otp_enc") != 0) {
-                send(establishedConnectionFD, "no", 2, 0);
-                close(establishedConnectionFD);
+            // Store client authentication string
+            char clientAuth[32];
+            memset(clientAuth, 0, sizeof(clientAuth));
+            // Read the authentication string sent by the client
+            read(newsockfd, clientAuth, sizeof(clientAuth) - 1);
+            // Check if the client is enc_client 
+            if (strcmp(clientAuth, "enc_bs") != 0) {
+                char response[] = "invalid";
+                write(newsockfd, response, sizeof(response));
+                // Exit child process on failed authentication
                 exit(2);
             } else {
-                send(establishedConnectionFD, "yes", 3, 0);
+                char response[] = "enc_d_bs";
+                write(newsockfd, response, sizeof(response));
             }
 
-            // Step 2: Receive message length as string
-            memset(buffer, 0, BUFFER_SIZE);
-            n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-            if (n < 0) error("ERROR reading from socket");
-            int messageLength = atoi(buffer);
-            if (messageLength <= 0) {
-                close(establishedConnectionFD);
+            // Store how many bytes read from the socket 
+            int bytesRead;
+            // Loop continues up bytes_remaining 
+            while ((bytesRead = read(newsockfd, p, bytes_remaining)) > 0) {
+                for (int i = 0; i < bytesRead; i++) {
+                    if (p[i] == '\n') {
+                        newlines++;
+                        if (newlines == 1) keyStart = p + i + 1;
+                    }
+                }
+                if (newlines == 2) break;
+                // Advances the pointer forward by the number of bytes
+                p += bytesRead;
+                // Decreases the remaining space in the buffer
+                bytes_remaining -= bytesRead;
+            }
+            // If negative value then an error occurred reading from the socket
+            if (bytesRead < 0) {
+                fprintf(stderr, "enc_server: ERROR reading from socket\n");
                 exit(1);
             }
 
-            // Confirm ready to receive
-            send(establishedConnectionFD, "cont", 4, 0);
+            // Separate message and key
+            char message[BUFFER_SIZE], key[BUFFER_SIZE];
+            memset(message, 0, sizeof(message));
+            memset(key, 0, sizeof(key));
+            // keyStart is a pointer to the start key 
+            // buffer is the start of the received data containing both message and key 
+            //1 to exclude the nwline character before the key
+            int msgLen = keyStart - buffer - 1;
+            strncpy(message, buffer, msgLen);
+            strcpy(key, keyStart);
 
-            // Step 3: Receive message data fully
-            char *message = malloc(messageLength + 1);
-            if (!message) error("Memory allocation failed");
-            int totalReceived = 0;
-            while (totalReceived < messageLength) {
-                memset(buffer, 0, BUFFER_SIZE);
-                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-                if (n < 0) {
-                    free(message);
-                    error("ERROR reading from socket");
+            // Calculates the length of the key string
+            int keyLen = strlen(key);
+            // If the last character of the key is a newline, -1 
+            if (key[keyLen - 1] == '\n') keyLen--;
+            // If the key is shorter than the plaintext message then print error message
+            if (keyLen < msgLen) {
+                fprintf(stderr, "enc_server: ERROR - key shorter than message\n");
+                exit(1);
+            }
+
+            // Loop over each character in the message
+            for (int i = 0; i < msgLen; i++) {
+                if (!isValidChar(message[i])) {
+                    fprintf(stderr, "enc_server: ERROR - invalid character in message\n");
+                    exit(1);
                 }
-                memcpy(message + totalReceived, buffer, n);
-                totalReceived += n;
             }
-            message[messageLength] = '\0';
-
-            // Step 4: Receive key data fully (same length as message)
-            char *key = malloc(messageLength + 1);
-            if (!key) {
-                free(message);
-                error("Memory allocation failed");
-            }
-            totalReceived = 0;
-            while (totalReceived < messageLength) {
-                memset(buffer, 0, BUFFER_SIZE);
-                n = recv(establishedConnectionFD, buffer, BUFFER_SIZE - 1, 0);
-                if (n < 0) {
-                    free(message);
-                    free(key);
-                    error("ERROR reading from socket");
+            // Loop over every character in the key
+            for (int i = 0; i < keyLen; i++) {
+                if (!isValidChar(key[i])) {
+                    fprintf(stderr, "enc_server: ERROR - invalid character in key\n");
+                    _Exit(1);
                 }
-                memcpy(key + totalReceived, buffer, n);
-                totalReceived += n;
             }
-            key[messageLength] = '\0';
-
-            // Step 5: Encrypt message
-            encrypt(message, key, messageLength);
-
-            // Step 6: Send encrypted message back to client in chunks
-            int totalSent = 0;
-            while (totalSent < messageLength) {
-                int toSend = (messageLength - totalSent) > BUFFER_SIZE ? BUFFER_SIZE : (messageLength - totalSent);
-                n = send(establishedConnectionFD, message + totalSent, toSend, 0);
-                if (n < 0) {
-                    free(message);
-                    free(key);
-                    error("ERROR writing to socket");
-                }
-                totalSent += n;
-            }
-
-            // Clean up
-            free(message);
-            free(key);
-            close(establishedConnectionFD);
-            exit(0); // Child terminates after serving client
+            // Modifies the message in place converting it into ciphertext using the key
+            // One-time pad
+            encrypt(message, key);
+            write(newsockfd, message, strlen(message));
+            close(newsockfd);
+            exit(0);
         } else {
-            // Parent process closes connection and waits for child cleanup
-            close(establishedConnectionFD);
-            waitpid(-1, NULL, WNOHANG);
+            // Runs in the parent process after forking
+            activeConnections += 1;
+            // Finished child processes
+            while (waitpid(-1, NULL, WNOHANG) > 0)
+                activeConnections -= 1;
+            close(newsockfd);
         }
     }
 
-    close(listenSocketFD);
+    close(sockfd);
     return 0;
 }
