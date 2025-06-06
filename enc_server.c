@@ -38,7 +38,7 @@ void encrypt_message(char* plaintext, char* key, char* ciphertext) {
         int plain_num = (plaintext[i] == ' ') ? 26 : (plaintext[i] - 'A');
         int key_num = (key[i] == ' ') ? 26 : (key[i] - 'A');
 
-        // Your encoding formula as given
+        // Encoding formula as given
         int sum = (plain_num ^ key_num) + 2 * (plain_num & key_num);
         int encoded_digit = sum % 27;
 
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]) {
     int yes = 1;
     if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
         perror("setsockopt(SO_REUSEADDR) failed");
-        // Not fatal; continue
+        // Not fatal; continue anyway
     }
 
     // Setup address struct
@@ -221,7 +221,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Cleanup: close listening socket (never reached in this server)
+    // Cleanup: close listening socket (never reached)
     close(listen_fd);
     return 0;
 }
