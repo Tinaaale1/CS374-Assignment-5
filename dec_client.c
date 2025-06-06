@@ -2,177 +2,193 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
+#include <sys/types.h>  
+#include <sys/socket.h> 
+#include <netdb.h>      
 #include <netinet/in.h>
-#include <netdb.h>
-#include <fcntl.h>
-#include <errno.h>
 
-// Print error and exit with given code
-void errorExit(const char *msg, int code) {
+#define MAX_BUFFER 150000
+
+void error_exit(const char *msg, int code) {
     fprintf(stderr, "%s\n", msg);
     exit(code);
 }
 
-// Get file size by reading bytes
-int get_file_size_from_read(const char *filename) {
-    int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "ERROR opening file %s: %s\n", filename, strerror(errno));
-        exit(1);
+void setupAddressStruct(struct sockaddr_in* address, int portNumber, char* hostname){
+    memset((char*) address, '\0', sizeof(*address)); 
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+
+    struct hostent* hostInfo = gethostbyname(hostname); 
+    if (hostInfo == NULL) { 
+        fprintf(stderr, "CLIENT: ERROR, no such host\n"); 
+        exit(2); 
     }
-    int count = 0;
-    char ch;
-    while (read(fd, &ch, 1) > 0) {
-        count++;
-    }
-    close(fd);
-    return count;
+    memcpy((char*) &address->sin_addr.s_addr, 
+           hostInfo->h_addr_list[0],
+           hostInfo->h_length);
 }
 
-// Send entire file contents over socket
-void sendFile(const char *filename, int sockfd) {
-    int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "ERROR opening file %s\n", filename);
-        exit(1);
-    }
+int readFile(const char* filename, char* buffer) {
+    FILE* f = fopen(filename, "r");
+    if (!f) return 0;
+    size_t n = fread(buffer, 1, MAX_BUFFER - 1, f);
+    buffer[n] = '\0';
+    fclose(f);
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') buffer[len - 1] = '\0';
+    return 1;
+}
 
-    char buffer[100000];
-    ssize_t bytes_read;
-    while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-        ssize_t total_written = 0;
-        while (total_written < bytes_read) {
-            ssize_t bytes_written = write(sockfd, buffer + total_written, bytes_read - total_written);
-            if (bytes_written < 0) {
-                fprintf(stderr, "Client: ERROR writing to socket: %s\n", strerror(errno));
-                close(fd);
-                exit(1);
-            }
-            total_written += bytes_written;
+int validateText(const char* text) {
+    for (int i = 0; text[i] != '\0'; i++) {
+        if (text[i] != ' ' && (text[i] < 'A' || text[i] > 'Z')) {
+            return 0;
         }
     }
-    if (bytes_read < 0) {
-        fprintf(stderr, "Client: ERROR reading file %s: %s\n", filename, strerror(errno));
-        close(fd);
-        exit(1);
-    }
+    return 1;
+}
 
-    close(fd);
+ssize_t sendAll(int socketFD, const char* buffer, size_t length) {
+    size_t totalSent = 0;
+    while (totalSent < length) {
+        ssize_t sent = send(socketFD, buffer + totalSent, length - totalSent, 0);
+        if (sent < 0) return -1;
+        totalSent += sent;
+    }
+    return totalSent;
+}
+
+int recvUntilNewline(int socketFD, char* buffer, size_t maxLen) {
+    size_t total = 0;
+    while (total < maxLen - 1) {
+        char ch;
+        ssize_t r = recv(socketFD, &ch, 1, 0);
+        if (r <= 0) return 0; // error or disconnect
+        if (ch == '\n') {
+            buffer[total] = '\0';
+            return 1;
+        }
+        buffer[total++] = ch;
+    }
+    buffer[maxLen - 1] = '\0';
+    return 1;
 }
 
 int main(int argc, char *argv[]) {
-    int clientsockfd, portnum;
-    struct sockaddr_in server_addr;
-    struct hostent *server;
-    char buffer[100000];
-    const char hostname[] = "localhost";
+    if (argc != 4) { 
+        fprintf(stderr,"USAGE: %s ciphertext key port\n", argv[0]); 
+        exit(1); 
+    } 
 
-    if (argc != 4) {
-        fprintf(stderr, "usage %s <inputfile> <key> <port>\n", argv[0]);
+    char ciphertext[MAX_BUFFER];
+    char key[MAX_BUFFER];
+    char buffer[MAX_BUFFER];
+    int portNumber = atoi(argv[3]);
+    if (portNumber <= 0) {
+        fprintf(stderr, "dec_client: ERROR invalid port\n");
         exit(1);
     }
 
-    portnum = atoi(argv[3]);
-    clientsockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (clientsockfd < 0) {
-        fprintf(stderr, "Client: ERROR opening socket\n");
+    // Read ciphertext file
+    if (!readFile(argv[1], ciphertext)) {
+        fprintf(stderr, "dec_client: ERROR opening ciphertext file %s\n", argv[1]);
         exit(1);
     }
 
-    server = gethostbyname(hostname);
-    if (server == NULL) {
-        fprintf(stderr, "Client: ERROR, no such host\n");
+    // Read key file
+    if (!readFile(argv[2], key)) {
+        fprintf(stderr, "dec_client: ERROR opening key file %s\n", argv[2]);
+        exit(1);
+    }
+
+    // Validate ciphertext and key characters
+    if (!validateText(ciphertext)) {
+        fprintf(stderr, "dec_client: ERROR ciphertext contains bad characters\n");
+        exit(1);
+    }
+    if (!validateText(key)) {
+        fprintf(stderr, "dec_client: ERROR key contains bad characters\n");
+        exit(1);
+    }
+
+    // Check key length >= ciphertext length
+    if (strlen(key) < strlen(ciphertext)) {
+        fprintf(stderr, "dec_client: ERROR key is too short\n");
+        exit(1);
+    }
+
+    // Create socket
+    int socketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketFD < 0) {
+        fprintf(stderr, "dec_client: ERROR opening socket\n");
         exit(2);
     }
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    memcpy(&server_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
-    server_addr.sin_port = htons(portnum);
+    struct sockaddr_in serverAddress;
+    setupAddressStruct(&serverAddress, portNumber, "localhost");
 
-    if (connect(clientsockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        fprintf(stderr, "unable to contact otp_dec_d on given port\n");
+    // Connect to server
+    if (connect(socketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+        fprintf(stderr, "dec_client: ERROR connecting to port %d\n", portNumber);
+        close(socketFD);
         exit(2);
     }
 
-    // Authentication handshake for dec_client with newline
-    char auth[] = "dec_bs\n";   // Must match dec_server's expected auth string
-    if (write(clientsockfd, auth, strlen(auth)) < 0) {
-        fprintf(stderr, "Client: ERROR writing auth\n");
-        exit(1);
-    }
-
-    memset(buffer, 0, sizeof(buffer));
-    ssize_t n = read(clientsockfd, buffer, sizeof(buffer) - 1);
-    if (n < 0) {
-        fprintf(stderr, "Client: ERROR reading auth response\n");
-        exit(1);
-    }
-    buffer[n] = '\0';
-
-    // Server must respond with "dec_d_bs" or reject connection
-    if (strcmp(buffer, "dec_d_bs") != 0) {
-        fprintf(stderr, "unable to contact otp_dec_d on given port\n");
+    // Send handshake to identify as dec_client
+    snprintf(buffer, sizeof(buffer), "DEC_CLIENT\n");
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "dec_client: ERROR sending handshake\n");
+        close(socketFD);
         exit(2);
     }
 
-    int infilelength = get_file_size_from_read(argv[1]);
-    int keylength = get_file_size_from_read(argv[2]);
-
-    // Key must be at least as long as ciphertext
-    if (keylength < infilelength) {
-        fprintf(stderr, "key is too short\n");
-        exit(1);
+    // Receive handshake response
+    if (!recvUntilNewline(socketFD, buffer, sizeof(buffer))) {
+        fprintf(stderr, "dec_client: ERROR no handshake response\n");
+        close(socketFD);
+        exit(2);
     }
 
-    // Validate ciphertext file characters (only uppercase letters and space allowed)
-    int fd = open(argv[1], O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "ERROR opening file %s\n", argv[1]);
-        exit(1);
-    }
-    char ch;
-    while (read(fd, &ch, 1) > 0) {
-        if (ch != ' ' && (ch < 'A' || ch > 'Z')) {
-            if (ch != '\n') {
-                fprintf(stderr, "%s contains invalid characters\n", argv[1]);
-                close(fd);
-                exit(1);
-            }
-        }
-    }
-    close(fd);
-
-    // Send ciphertext file, then newline
-    sendFile(argv[1], clientsockfd);
-    if (write(clientsockfd, "\n", 1) < 0) {
-        fprintf(stderr, "Client: ERROR writing newline after ciphertext\n");
-        exit(1);
+    // Reject if not dec_server
+    if (strcmp(buffer, "DEC_SERVER") == 0) {
+        // Proceed normally
+    } else if (strcmp(buffer, "ENC_SERVER") == 0) {
+        fprintf(stderr, "dec_client: ERROR rejected by server (likely enc_server)\n");
+        close(socketFD);
+        exit(2);
+    } else {
+        fprintf(stderr, "dec_client: ERROR unknown server response\n");
+        close(socketFD);
+        exit(2);
     }
 
-    // Send key file, then newline
-    sendFile(argv[2], clientsockfd);
-    if (write(clientsockfd, "\n", 1) < 0) {
-        fprintf(stderr, "Client: ERROR writing newline after key\n");
-        exit(1);
+    // Send ciphertext + newline
+    snprintf(buffer, sizeof(buffer), "%s\n", ciphertext);
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "dec_client: ERROR sending ciphertext\n");
+        close(socketFD);
+        exit(2);
     }
 
-    // Signal end of transmission (no more writes)
-    shutdown(clientsockfd, SHUT_WR);
-
-    // Receive decrypted plaintext from server
-    memset(buffer, 0, sizeof(buffer));
-    n = read(clientsockfd, buffer, sizeof(buffer) - 1);
-    if (n < 0) {
-        fprintf(stderr, "Client: ERROR reading from socket\n");
-        exit(1);
+    // Send key + newline
+    snprintf(buffer, sizeof(buffer), "%s\n", key);
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "dec_client: ERROR sending key\n");
+        close(socketFD);
+        exit(2);
     }
-    buffer[n] = '\0';
 
-    printf("%s", buffer);  // Print exactly what server sent, no extra newline
+    // Receive plaintext until newline
+    if (!recvUntilNewline(socketFD, buffer, sizeof(buffer))) {
+        fprintf(stderr, "dec_client: ERROR receiving plaintext\n");
+        close(socketFD);
+        exit(2);
+    }
 
-    close(clientsockfd);
+    // Output plaintext to stdout
+    printf("%s\n", buffer);
+
+    close(socketFD);
     return 0;
 }
