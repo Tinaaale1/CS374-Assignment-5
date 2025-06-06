@@ -14,6 +14,36 @@ void error_exit(const char *msg, int code) {
     exit(code);
 }
 
+// Sends all bytes in buffer over sockfd
+void sendit(int sockfd, const char *buffer, size_t len) {
+    size_t total_sent = 0;
+    while (total_sent < len) {
+        ssize_t sent = send(sockfd, buffer + total_sent, len - total_sent, 0);
+        if (sent < 0) {
+            perror("send");
+            exit(2);
+        }
+        total_sent += sent;
+    }
+}
+
+// Receives exactly len bytes from sockfd into buffer
+void recieveall(int sockfd, char *buffer, size_t len) {
+    size_t total_recv = 0;
+    while (total_recv < len) {
+        ssize_t recvd = recv(sockfd, buffer + total_recv, len - total_recv, 0);
+        if (recvd < 0) {
+            perror("recv");
+            exit(2);
+        }
+        if (recvd == 0) {
+            fprintf(stderr, "Connection closed prematurely\n");
+            exit(2);
+        }
+        total_recv += recvd;
+    }
+}
+
 // Simplified grabfilecontents: read file into payload buffer, validate chars
 void grabfilecontents(const char *filename, char *payload, int limit_size) {
     FILE *file = fopen(filename, "r");
