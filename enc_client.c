@@ -166,17 +166,35 @@ int main(int argc, char *argv[]) {
         exit(2);
     }
 
-    // Send plaintext + newline
-    snprintf(buffer, sizeof(buffer), "%s\n", plaintext);
-    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+    // Prepare and send plaintext + newline safely
+    size_t len = strlen(plaintext);
+    if (len + 1 >= sizeof(buffer)) {
+        fprintf(stderr, "enc_client: ERROR plaintext too large\n");
+        close(socketFD);
+        exit(1);
+    }
+    memcpy(buffer, plaintext, len);
+    buffer[len] = '\n';
+    buffer[len + 1] = '\0';
+
+    if (sendAll(socketFD, buffer, len + 1) < 0) {
         fprintf(stderr, "enc_client: ERROR sending plaintext\n");
         close(socketFD);
         exit(2);
     }
 
-    // Send key + newline
-    snprintf(buffer, sizeof(buffer), "%s\n", key);
-    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+    // Prepare and send key + newline safely
+    len = strlen(key);
+    if (len + 1 >= sizeof(buffer)) {
+        fprintf(stderr, "enc_client: ERROR key too large\n");
+        close(socketFD);
+        exit(1);
+    }
+    memcpy(buffer, key, len);
+    buffer[len] = '\n';
+    buffer[len + 1] = '\0';
+
+    if (sendAll(socketFD, buffer, len + 1) < 0) {
         fprintf(stderr, "enc_client: ERROR sending key\n");
         close(socketFD);
         exit(2);
