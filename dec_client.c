@@ -163,17 +163,33 @@ int main(int argc, char *argv[]) {
         exit(2);
     }
 
-    // Send ciphertext + newline
-    snprintf(buffer, sizeof(buffer), "%s\n", ciphertext);
-    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+    // Send ciphertext + newline safely
+    size_t len = strlen(ciphertext);
+    if (len + 1 >= sizeof(buffer)) {
+        fprintf(stderr, "dec_client: ERROR ciphertext too large\n");
+        close(socketFD);
+        exit(1);
+    }
+    memcpy(buffer, ciphertext, len);
+    buffer[len] = '\n';
+    buffer[len + 1] = '\0';
+    if (sendAll(socketFD, buffer, len + 1) < 0) {
         fprintf(stderr, "dec_client: ERROR sending ciphertext\n");
         close(socketFD);
         exit(2);
     }
 
-    // Send key + newline
-    snprintf(buffer, sizeof(buffer), "%s\n", key);
-    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+    // Send key + newline safely
+    len = strlen(key);
+    if (len + 1 >= sizeof(buffer)) {
+        fprintf(stderr, "dec_client: ERROR key too large\n");
+        close(socketFD);
+        exit(1);
+    }
+    memcpy(buffer, key, len);
+    buffer[len] = '\n';
+    buffer[len + 1] = '\0';
+    if (sendAll(socketFD, buffer, len + 1) < 0) {
         fprintf(stderr, "dec_client: ERROR sending key\n");
         close(socketFD);
         exit(2);
