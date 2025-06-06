@@ -9,13 +9,13 @@
 
 #define MAX_BUFFER 150000
 
-// Error helper: print message and exit with code
+// Print error and exit with code
 void error(const char *msg, int code) {
     fprintf(stderr, "%s\n", msg);
     exit(code);
 }
 
-// Read file contents into buffer, validate chars (A-Z and space), remove newline
+// Read file contents, remove newline, validate characters
 void grabfilecontents(const char *filename, char *buffer, size_t limit_size) {
     FILE *file = fopen(filename, "r");
     if (!file) error("error", 1);
@@ -30,7 +30,7 @@ void grabfilecontents(const char *filename, char *buffer, size_t limit_size) {
     size_t len = strcspn(buffer, "\n");
     buffer[len] = '\0';
 
-    // Validate characters
+    // Validate allowed chars A-Z and space
     static int lettermap[256] = {0};
     if (lettermap['A'] == 0) {
         for (char c = 'A'; c <= 'Z'; c++) lettermap[(unsigned char)c] = 1;
@@ -42,19 +42,19 @@ void grabfilecontents(const char *filename, char *buffer, size_t limit_size) {
     }
 }
 
-// Prepare sockaddr_in struct with given hostname and port
+// Setup sockaddr_in struct
 void netaddressformat(struct sockaddr_in *address, int portNumber, const char *hostname) {
     memset(address, 0, sizeof(*address));
     address->sin_family = AF_INET;
     address->sin_port = htons(portNumber);
 
     struct hostent *hostInfo = gethostbyname(hostname);
-    if (!hostInfo) error("ERROR", 2);
+    if (!hostInfo) error("error", 2);
 
     memcpy(&address->sin_addr.s_addr, hostInfo->h_addr_list[0], hostInfo->h_length);
 }
 
-// Wrapper to send all bytes
+// Send all bytes reliably
 void sendit(int sockfd, const char *buffer, size_t length) {
     size_t total = 0;
     while (total < length) {
@@ -64,7 +64,7 @@ void sendit(int sockfd, const char *buffer, size_t length) {
     }
 }
 
-// Wrapper to receive all bytes
+// Receive exactly length bytes
 void recieveall(int sockfd, char *buffer, size_t length) {
     size_t total = 0;
     while (total < length) {
@@ -72,6 +72,19 @@ void recieveall(int sockfd, char *buffer, size_t length) {
         if (recvd <= 0) error("error", 2);
         total += recvd;
     }
+}
+
+// Receive string line until '\n'
+void receive_line(int sockfd, char *buffer, size_t max_len) {
+    size_t i = 0;
+    while (i < max_len - 1) {
+        char c;
+        ssize_t n = recv(sockfd, &c, 1, 0);
+        if (n <= 0) error("error", 2);
+        if (c == '\n') break;
+        buffer[i++] = c;
+    }
+    buffer[i] = '\0';
 }
 
 int main(int argc, char *argv[]) {
@@ -84,47 +97,67 @@ int main(int argc, char *argv[]) {
     grabfilecontents(argv[1], gotplaintext, sizeof(gotplaintext));
     grabfilecontents(argv[2], gotkey, sizeof(gotkey));
 
-    int calcptbites = (int)strlen(gotplaintext);
-    int keybits = (int)strlen(gotkey);
-    if (keybits < calcptbites) error("error", 1);
+    int pt_len = (int)strlen(gotplaintext);
+    int key_len = (int)strlen(gotkey);
+    if (key_len < pt_len) error("error", 1);
 
-    int coresocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (coresocket < 0) error("error", 2);
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) error("error", 2);
 
-    struct sockaddr_in srvNetInfo;
-    netaddressformat(&srvNetInfo, atoi(argv[3]), "localhost");
+    struct sockaddr_in server_addr;
+    netaddressformat(&server_addr, atoi(argv[3]), "localhost");
 
-    if (connect(coresocket, (struct sockaddr *)&srvNetInfo, sizeof(srvNetInfo)) < 0) {
-        dprintf(STDERR_FILENO, "ERROR %s\n", argv[3]);
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        dprintf(STDERR_FILENO, "error\n");
         exit(2);
     }
 
-    // Send "ENC"
-    sendit(coresocket, "ENC", 3);
+    // Step 1: Send client ID
+    sendit(sockfd, "enc_client", strlen("enc_client"));
 
-    // Receive "OK"
-    char response[2];
-    recieveall(coresocket, response, 2);
-    if (strncmp(response, "OK", 2) != 0) error("error", 2);
+    // Step 2: Receive accept/reject
+    char response[20];
+    memset(response, 0, sizeof(response));
+    ssize_t recvd = recv(sockfd, response, sizeof(response) - 1, 0);
+    if (recvd <= 0) error("error", 2);
+    response[recvd] = '\0';
 
-    // Send plaintext size, then plaintext
-    sendit(coresocket, (char *)&calcptbites, sizeof(int));
-    sendit(coresocket, gotplaintext, calcptbites);
+    if (strcmp(response, "accept") != 0) error("error", 2);
 
-    // Send key size, then key
-    sendit(coresocket, (char *)&keybits, sizeof(int));
-    sendit(coresocket, gotkey, keybits);
+    // Step 3: Send plaintext size as ASCII string with newline
+    char size_str[20];
+    snprintf(size_str, sizeof(size_str), "%d\n", pt_len);
+    sendit(sockfd, size_str, strlen(size_str));
 
-    // Receive encrypted text size (overwrite calcptbites, unused in your original code but consistent)
-    recieveall(coresocket, (char *)&calcptbites, sizeof(int));
+    // Step 4: Receive acknowledgment "size_received"
+    receive_line(sockfd, response, sizeof(response));
+    if (strcmp(response, "size_received") != 0) error("error", 2);
 
-    // Receive encrypted text
-    recieveall(coresocket, encCptext, calcptbites);
+    // Step 5: Send plaintext bytes
+    sendit(sockfd, gotplaintext, pt_len);
 
-    // Print encrypted message + newline
-    write(STDOUT_FILENO, encCptext, (size_t)calcptbites);
+    // Step 6: Receive acknowledgment "size_received"
+    receive_line(sockfd, response, sizeof(response));
+    if (strcmp(response, "size_received") != 0) error("error", 2);
+
+    // Step 7: Send key size as ASCII string with newline
+    snprintf(size_str, sizeof(size_str), "%d\n", key_len);
+    sendit(sockfd, size_str, strlen(size_str));
+
+    // Step 8: Receive acknowledgment "size_received"
+    receive_line(sockfd, response, sizeof(response));
+    if (strcmp(response, "size_received") != 0) error("error", 2);
+
+    // Step 9: Send key bytes
+    sendit(sockfd, gotkey, key_len);
+
+    // Step 10: Receive ciphertext bytes (length = pt_len)
+    recieveall(sockfd, encCptext, pt_len);
+
+    // Print ciphertext + newline
+    write(STDOUT_FILENO, encCptext, pt_len);
     write(STDOUT_FILENO, "\n", 1);
 
-    close(coresocket);
+    close(sockfd);
     return 0;
 }
