@@ -2,168 +2,165 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <ctype.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/wait.h>
-#include <signal.h>
+#include <netinet/in.h>
+#include <netdb.h>
 
-#define MAX_MSG_SIZE 150000
+#define MAX_BUFFER 150000
+#define MAX_BACKLOG 5
+#define HANDSHAKE_MSG "ENC_CLIENT"
+#define HANDSHAKE_ACK "ENC_SERVER"
 
-// Helper function to check valid characters (A-Z and space)
-int isValidChar(char c) {
-    return (c == ' ' || (c >= 'A' && c <= 'Z'));
+void error(const char* msg) {
+    fprintf(stderr, "%s\n", msg);
+    exit(1);
 }
 
-// Encryption function: modulo 27 (A-Z + space)
-void encrypt(char *message, char *key, int length) {
-    for (int i = 0; i < length; i++) {
-        int msg_val = (message[i] == ' ') ? 26 : (message[i] - 'A');
-        int key_val = (key[i] == ' ') ? 26 : (key[i] - 'A');
-        int enc_val = (msg_val + key_val) % 27;
-        message[i] = (enc_val == 26) ? ' ' : ('A' + enc_val);
+int charToInt(char c) {
+    return (c == ' ') ? 26 : c - 'A';
+}
+
+char intToChar(int i) {
+    return (i == 26) ? ' ' : 'A' + i;
+}
+
+void encrypt(const char* plaintext, const char* key, char* ciphertext) {
+    for (int i = 0; plaintext[i] != '\0'; i++) {
+        int pt = charToInt(plaintext[i]);
+        int kt = charToInt(key[i]);
+        ciphertext[i] = intToChar((pt + kt) % 27);
     }
+    ciphertext[strlen(plaintext)] = '\0';
 }
 
-// Read from socket until newline or max_len-1 chars
-ssize_t recv_until_newline(int sockfd, char *buf, size_t max_len) {
+ssize_t sendAll(int sockfd, const char* buffer, size_t length) {
     size_t total = 0;
-    while (total < max_len - 1) {
-        char c;
-        ssize_t n = recv(sockfd, &c, 1, 0);
-        if (n <= 0) return n;  // error or closed
-        if (c == '\n') break;
-        buf[total++] = c;
+    while (total < length) {
+        ssize_t sent = send(sockfd, buffer + total, length - total, 0);
+        if (sent <= 0) return -1;
+        total += sent;
     }
-    buf[total] = '\0';
     return total;
 }
 
-int main(int argc, char *argv[]) {
-    int sockfd, newsockfd, portno, pid;
-    socklen_t clilen;
-    struct sockaddr_in serv_addr, cli_addr;
+void recvUntilNewline(int sockfd, char* buffer) {
+    memset(buffer, 0, MAX_BUFFER);
+    int total = 0;
+    while (1) {
+        char chunk[1024];
+        memset(chunk, 0, sizeof(chunk));
+        int n = recv(sockfd, chunk, sizeof(chunk) - 1, 0);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++) {
+            if (chunk[i] == '\n') {
+                strncat(buffer, chunk, i);
+                return;
+            }
+        }
+        strcat(buffer, chunk);
+        total += n;
+        if (total >= MAX_BUFFER - 1) break;
+    }
+}
+
+void setupAddressStruct(struct sockaddr_in* address, int portNumber) {
+    memset((char*) address, '\0', sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+    address->sin_addr.s_addr = INADDR_ANY;
+}
+
+void handleClient(int connectionSocket) {
+    char buffer[MAX_BUFFER], key[MAX_BUFFER], ciphertext[MAX_BUFFER];
+
+    // Step 1: Handshake
+    memset(buffer, 0, sizeof(buffer));
+    recvUntilNewline(connectionSocket, buffer);
+    if (strcmp(buffer, HANDSHAKE_MSG) != 0) {
+        fprintf(stderr, "enc_server: ERROR invalid client\n");
+        close(connectionSocket);
+        exit(1);
+    }
+    sendAll(connectionSocket, HANDSHAKE_ACK, strlen(HANDSHAKE_ACK));
+
+    // Step 2: Receive plaintext
+    memset(buffer, 0, sizeof(buffer));
+    recvUntilNewline(connectionSocket, buffer);
+    strcpy(buffer, strtok(buffer, "\n"));  // Remove newline
+    char plaintext[MAX_BUFFER];
+    strcpy(plaintext, buffer);
+
+    // Step 3: Receive key
+    memset(key, 0, sizeof(key));
+    recvUntilNewline(connectionSocket, key);
+    strcpy(key, strtok(key, "\n"));
+
+    // 🔒 Step 3.5: Validate key length
+    if (strlen(key) < strlen(plaintext)) {
+        fprintf(stderr, "enc_server: ERROR key too short\n");
+        close(connectionSocket);
+        exit(1);
+    }
+
+    // Step 4: Encrypt
+    memset(ciphertext, 0, sizeof(ciphertext));
+    encrypt(plaintext, key, ciphertext);
+    strcat(ciphertext, "\n");
+
+    // Step 5: Send ciphertext
+    sendAll(connectionSocket, ciphertext, strlen(ciphertext));
+
+    close(connectionSocket);
+    exit(0);
+}
+
+int main(int argc, char* argv[]) {
+    int listenSocketFD, connectionSocketFD;
+    socklen_t sizeOfClientInfo;
+    struct sockaddr_in serverAddress, clientAddress;
 
     if (argc < 2) {
-        fprintf(stderr, "ERROR, no port provided\n");
+        fprintf(stderr, "USAGE: %s port\n", argv[0]);
         exit(1);
     }
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("ERROR opening socket");
-        exit(1);
-    }
+    listenSocketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocketFD < 0) error("enc_server: ERROR opening socket");
 
-    memset((char *)&serv_addr, 0, sizeof(serv_addr));
-    portno = atoi(argv[1]);
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(portno);
+    int yes = 1;
+    if (setsockopt(listenSocketFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) < 0)
+        error("enc_server: ERROR on setsockopt");
 
-    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("ERROR on binding");
-        exit(1);
-    }
+    setupAddressStruct(&serverAddress, atoi(argv[1]));
 
-    listen(sockfd, 5);
-    clilen = sizeof(cli_addr);
+    if (bind(listenSocketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0)
+        error("enc_server: ERROR on binding");
+
+    listen(listenSocketFD, MAX_BACKLOG);
 
     while (1) {
-        newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
-        if (newsockfd < 0) {
-            perror("ERROR on accept");
+        sizeOfClientInfo = sizeof(clientAddress);
+        connectionSocketFD = accept(listenSocketFD, (struct sockaddr*)&clientAddress, &sizeOfClientInfo);
+        if (connectionSocketFD < 0) {
+            fprintf(stderr, "enc_server: ERROR on accept\n");
             continue;
         }
 
-        pid = fork();
+        pid_t pid = fork();
         if (pid < 0) {
-            perror("ERROR on fork");
-            close(newsockfd);
-            continue;
-        }
-
-        if (pid == 0) {
-            close(sockfd);
-
-            char clientAuth[20];
-            ssize_t n = recv_until_newline(newsockfd, clientAuth, sizeof(clientAuth));
-            if (n <= 0) {
-                close(newsockfd);
-                exit(1);
-            }
-
-            if (strcmp(clientAuth, "enc_d_bs") != 0) {
-                char response[] = "invalid\n";
-                write(newsockfd, response, strlen(response));
-                close(newsockfd);
-                exit(2);
-            }
-
-            char serverToken[] = "enc_d_bs\n";
-            n = write(newsockfd, serverToken, strlen(serverToken));
-            if (n < 0) {
-                close(newsockfd);
-                exit(1);
-            }
-
-            char message[MAX_MSG_SIZE];
-            n = recv_until_newline(newsockfd, message, sizeof(message));
-            if (n <= 0) {
-                close(newsockfd);
-                exit(1);
-            }
-
-            char key[MAX_MSG_SIZE];
-            n = recv_until_newline(newsockfd, key, sizeof(key));
-            if (n <= 0) {
-                close(newsockfd);
-                exit(1);
-            }
-
-            int msgLen = strlen(message);
-            int keyLen = strlen(key);
-
-            if (keyLen < msgLen) {
-                char errorMsg[] = "Error: key too short\n";
-                write(newsockfd, errorMsg, strlen(errorMsg));
-                fprintf(stderr, "enc_server: ERROR - key shorter than message\n");
-                close(newsockfd);
-                exit(1);
-            }
-
-            for (int i = 0; i < msgLen; i++) {
-                if (!isValidChar(message[i])) {
-                    char errorMsg[] = "Error: invalid character in message\n";
-                    write(newsockfd, errorMsg, strlen(errorMsg));
-                    fprintf(stderr, "enc_server: ERROR - invalid character in message\n");
-                    close(newsockfd);
-                    exit(1);
-                }
-            }
-            for (int i = 0; i < keyLen; i++) {
-                if (!isValidChar(key[i])) {
-                    char errorMsg[] = "Error: invalid character in key\n";
-                    write(newsockfd, errorMsg, strlen(errorMsg));
-                    fprintf(stderr, "enc_server: ERROR - invalid character in key\n");
-                    close(newsockfd);
-                    exit(1);
-                }
-            }
-
-            encrypt(message, key, msgLen);
-
-            // Send encrypted message plus newline
-            write(newsockfd, message, msgLen);
-            write(newsockfd, "\n", 1);
-
-            close(newsockfd);
-            exit(0);
+            fprintf(stderr, "enc_server: ERROR on fork\n");
+            close(connectionSocketFD);
+        } else if (pid == 0) {
+            close(listenSocketFD);
+            handleClient(connectionSocketFD);
         } else {
-            close(newsockfd);
+            close(connectionSocketFD);
+            while (waitpid(-1, NULL, WNOHANG) > 0);
         }
     }
-    close(sockfd);
+
+    close(listenSocketFD);
     return 0;
 }
