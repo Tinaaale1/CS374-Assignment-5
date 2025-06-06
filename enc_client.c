@@ -1,179 +1,197 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/socket.h>
+#include <string.h>
+#include <sys/types.h>  
+#include <sys/socket.h> 
+#include <netdb.h>      
 #include <netinet/in.h>
-#include <netdb.h>
 
-#define BUFFER_SIZE 150000  // Large enough buffer for plaintext, key, ciphertext
+#define MAX_BUFFER 150000
 
-// Check if input text contains only valid characters (A-Z and space)
-int is_valid_text(const char* text) {
+// Error function: print to stderr and exit with code 1 or 2 depending on context
+void error_exit(const char *msg, int code) {
+    fprintf(stderr, "%s\n", msg);
+    exit(code);
+}
+
+// Set up the address struct
+void setupAddressStruct(struct sockaddr_in* address, 
+                        int portNumber, 
+                        char* hostname){
+    memset((char*) address, '\0', sizeof(*address)); 
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+
+    struct hostent* hostInfo = gethostbyname(hostname); 
+    if (hostInfo == NULL) { 
+        fprintf(stderr, "CLIENT: ERROR, no such host\n"); 
+        exit(2); 
+    }
+    memcpy((char*) &address->sin_addr.s_addr, 
+           hostInfo->h_addr_list[0],
+           hostInfo->h_length);
+}
+
+// Read entire file into buffer, removing trailing newline if present
+int readFile(const char* filename, char* buffer) {
+    FILE* f = fopen(filename, "r");
+    if (!f) return 0;
+    size_t n = fread(buffer, 1, MAX_BUFFER - 1, f);
+    buffer[n] = '\0';
+    fclose(f);
+    // Remove trailing newline if present
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') buffer[len - 1] = '\0';
+    return 1;
+}
+
+// Validate that the text contains only A-Z and space
+int validateText(const char* text) {
     for (int i = 0; text[i] != '\0'; i++) {
-        if (text[i] != ' ' && !(text[i] >= 'A' && text[i] <= 'Z') && text[i] != '\n') {
+        if (text[i] != ' ' && (text[i] < 'A' || text[i] > 'Z')) {
             return 0;
         }
     }
     return 1;
 }
 
+// Send all bytes reliably
+ssize_t sendAll(int socketFD, const char* buffer, size_t length) {
+    size_t totalSent = 0;
+    while (totalSent < length) {
+        ssize_t sent = send(socketFD, buffer + totalSent, length - totalSent, 0);
+        if (sent < 0) return -1;
+        totalSent += sent;
+    }
+    return totalSent;
+}
+
+// Receive data until newline, store into buffer (null-terminated)
+int recvUntilNewline(int socketFD, char* buffer, size_t maxLen) {
+    size_t total = 0;
+    while (total < maxLen - 1) {
+        char ch;
+        ssize_t r = recv(socketFD, &ch, 1, 0);
+        if (r <= 0) return 0; // error or disconnect
+        if (ch == '\n') {
+            buffer[total] = '\0';
+            return 1;
+        }
+        buffer[total++] = ch;
+    }
+    buffer[maxLen - 1] = '\0';
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s plaintext key port\n", argv[0]);
+    if (argc != 4) { 
+        fprintf(stderr,"USAGE: %s plaintext key port\n", argv[0]); 
+        exit(1); 
+    } 
+
+    char plaintext[MAX_BUFFER];
+    char key[MAX_BUFFER];
+    char buffer[MAX_BUFFER];
+    int portNumber = atoi(argv[3]);
+    if (portNumber <= 0) {
+        fprintf(stderr, "enc_client: ERROR invalid port\n");
         exit(1);
     }
 
     // Read plaintext file
-    int plainfd = open(argv[1], O_RDONLY);
-    if (plainfd < 0) {
-        fprintf(stderr, "enc_client error: input contains bad characters\n");
-        exit(1);
-    }
-    char plaintext[BUFFER_SIZE] = {0};
-    ssize_t plain_len = read(plainfd, plaintext, sizeof(plaintext) - 1);
-    if (plain_len < 0) {
-        fprintf(stderr, "enc_client error: input contains bad characters\n");
-        close(plainfd);
-        exit(1);
-    }
-    close(plainfd);
-
-    // Remove trailing newline if present
-    if (plaintext[plain_len - 1] == '\n') {
-        plaintext[plain_len - 1] = '\0';
-        plain_len--;
-    } else {
-        plaintext[plain_len] = '\0';
-    }
-
-    // Validate plaintext
-    if (!is_valid_text(plaintext)) {
-        fprintf(stderr, "enc_client error: input contains bad characters\n");
+    if (!readFile(argv[1], plaintext)) {
+        fprintf(stderr, "enc_client: ERROR opening plaintext file %s\n", argv[1]);
         exit(1);
     }
 
     // Read key file
-    int keyfd = open(argv[2], O_RDONLY);
-    if (keyfd < 0) {
-        fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
-        exit(1);
-    }
-    char key[BUFFER_SIZE] = {0};
-    ssize_t key_len = read(keyfd, key, sizeof(key) - 1);
-    if (key_len < 0) {
-        fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
-        close(keyfd);
-        exit(1);
-    }
-    close(keyfd);
-
-    // Remove trailing newline from key if present
-    if (key[key_len - 1] == '\n') {
-        key[key_len - 1] = '\0';
-        key_len--;
-    } else {
-        key[key_len] = '\0';
-    }
-
-    if (key_len < plain_len) {
-        fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
+    if (!readFile(argv[2], key)) {
+        fprintf(stderr, "enc_client: ERROR opening key file %s\n", argv[2]);
         exit(1);
     }
 
-    int portnum = atoi(argv[3]);
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    struct hostent *server = gethostbyname("localhost");
-    if (server == NULL) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    memcpy(&serv_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
-    serv_addr.sin_port = htons(portnum);
-
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    // Send authorization string with newline
-    char auth_msg[] = "enc_d_bs\n";
-    if (send(sockfd, auth_msg, strlen(auth_msg), 0) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    // Receive authorization response
-    char auth_response[20] = {0};
-    ssize_t recvd = recv(sockfd, auth_response, sizeof(auth_response) - 1, 0);
-    if (recvd < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-    auth_response[recvd] = '\0';
-
-    if (strcmp(auth_response, "enc_d_bs\n") != 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    // Send plaintext with newline
-    if (send(sockfd, plaintext, plain_len, 0) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-    if (send(sockfd, "\n", 1, 0) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    // Send key with newline (only plaintext length)
-    if (send(sockfd, key, plain_len, 0) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-    if (send(sockfd, "\n", 1, 0) < 0) {
-        fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-        exit(2);
-    }
-
-    // Receive ciphertext from server
-    char ciphertext[BUFFER_SIZE] = {0};
-    size_t total_received = 0;
-    while (total_received < (size_t)plain_len) {
-        recvd = recv(sockfd, ciphertext + total_received, plain_len - total_received, 0);
-        if (recvd < 0) {
-            fprintf(stderr, "Error: could not contact enc_server on port %d\n", portnum);
-            exit(2);
-        }
-        if (recvd == 0) break;  // connection closed
-        total_received += recvd;
-    }
-
-    // Close socket
-    close(sockfd);
-
-    // Ensure ciphertext is null-terminated for safety
-    ciphertext[plain_len] = '\0';
-
-    // Write ciphertext to file named "ciphertext1"
-    FILE *out = fopen("ciphertext1", "w");
-    if (out == NULL) {
-        fprintf(stderr, "Error: could not write ciphertext1\n");
+    // Validate plaintext and key characters
+    if (!validateText(plaintext)) {
+        fprintf(stderr, "enc_client: ERROR plaintext contains bad characters\n");
         exit(1);
     }
-    fwrite(ciphertext, sizeof(char), plain_len, out);
-    fclose(out);
+    if (!validateText(key)) {
+        fprintf(stderr, "enc_client: ERROR key contains bad characters\n");
+        exit(1);
+    }
 
+    // Check key length >= plaintext length
+    if (strlen(key) < strlen(plaintext)) {
+        fprintf(stderr, "enc_client: ERROR key is too short\n");
+        exit(1);
+    }
+
+    // Create socket
+    int socketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketFD < 0) {
+        fprintf(stderr, "enc_client: ERROR opening socket\n");
+        exit(2);
+    }
+
+    struct sockaddr_in serverAddress;
+    setupAddressStruct(&serverAddress, portNumber, "localhost");
+
+    // Connect to server
+    if (connect(socketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+        fprintf(stderr, "enc_client: ERROR connecting to port %d\n", portNumber);
+        close(socketFD);
+        exit(2);
+    }
+
+    // Send handshake to identify as enc_client
+    snprintf(buffer, sizeof(buffer), "ENC_CLIENT\n");
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "enc_client: ERROR sending handshake\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Receive handshake response
+    if (!recvUntilNewline(socketFD, buffer, sizeof(buffer))) {
+        fprintf(stderr, "enc_client: ERROR no handshake response\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Reject if not enc_server
+    if (strcmp(buffer, "ENC_SERVER") != 0) {
+        fprintf(stderr, "enc_client: ERROR rejected by server (likely dec_server)\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Send plaintext + newline
+    snprintf(buffer, sizeof(buffer), "%s\n", plaintext);
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "enc_client: ERROR sending plaintext\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Send key + newline
+    snprintf(buffer, sizeof(buffer), "%s\n", key);
+    if (sendAll(socketFD, buffer, strlen(buffer)) < 0) {
+        fprintf(stderr, "enc_client: ERROR sending key\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Receive ciphertext until newline
+    if (!recvUntilNewline(socketFD, buffer, sizeof(buffer))) {
+        fprintf(stderr, "enc_client: ERROR receiving ciphertext\n");
+        close(socketFD);
+        exit(2);
+    }
+
+    // Output ciphertext to stdout
+    printf("%s\n", buffer);
+
+    close(socketFD);
     return 0;
 }
