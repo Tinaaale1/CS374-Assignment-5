@@ -7,6 +7,8 @@
 #include <netdb.h>      
 #include <netinet/in.h>
 #include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define MAX_BUFFER 150000
 
@@ -14,6 +16,14 @@
 void error_exit(const char *msg, int code) {
     fprintf(stderr, "%s\n", msg);
     exit(code);
+}
+
+// SIGCHLD handler to reap zombie child processes
+void sigchld_handler(int s) {
+    // waitpid() might overwrite errno, so save and restore it
+    int saved_errno = errno;
+    while(waitpid(-1, NULL, WNOHANG) > 0);
+    errno = saved_errno;
 }
 
 // Encryption function
@@ -28,6 +38,7 @@ void encrypt_message(char* plaintext, char* key, char* ciphertext) {
         int plain_num = (plaintext[i] == ' ') ? 26 : (plaintext[i] - 'A');
         int key_num = (key[i] == ' ') ? 26 : (key[i] - 'A');
 
+        // Your encoding formula as given
         int sum = (plain_num ^ key_num) + 2 * (plain_num & key_num);
         int encoded_digit = sum % 27;
 
@@ -50,9 +61,26 @@ int main(int argc, char *argv[]) {
     char key[MAX_BUFFER];
     char ciphertext[MAX_BUFFER];
 
+    // Setup SIGCHLD handler to reap zombies
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; // Restart interrupted syscalls
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(1);
+    }
+
     // Create socket
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) error_exit("Error opening socket", 1);
+
+    // Set SO_REUSEADDR to reuse port immediately after program exit
+    int yes = 1;
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        // Not fatal; continue
+    }
 
     // Setup address struct
     memset(&server_addr, 0, sizeof(server_addr));
@@ -64,8 +92,9 @@ int main(int argc, char *argv[]) {
     if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
         error_exit("Error on binding", 1);
 
-    // Listen
-    listen(listen_fd, 5);
+    // Listen for connections
+    if (listen(listen_fd, 5) < 0)
+        error_exit("Error on listen", 1);
 
     while (1) {
         client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
@@ -186,12 +215,13 @@ int main(int argc, char *argv[]) {
             close(client_fd);
             exit(0);
         } else {
-            // Parent process
+            // Parent process closes client socket and continues
             close(client_fd);
-            // Optionally reap zombie children here or rely on SIGCHLD handler
+            // Parent loops to accept new connections
         }
     }
 
+    // Cleanup: close listening socket (never reached in this server)
     close(listen_fd);
     return 0;
 }
