@@ -1,46 +1,35 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <string.h>
-#include <errno.h>
+#include <time.h>
+#include <unistd.h>
 
-// Total number of allowed characters: A-Z (0-25) and space (26)
-#define ALPHABET_SIZE 27
-
-// Get a random character from the allowed set
-char getRandomChar() {
-    int r = rand() % ALPHABET_SIZE;
-    return (r == 26) ? ' ' : 'A' + r;
-}
+static const char listofchars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
 
 int main(int argc, char *argv[]) {
-    // Check for correct number of arguments
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s keylength\n", argv[0]);
+        write(2, "Usage: ", 7);
+        write(2, argv[0], strlen(argv[0]));
+        write(2, " keylength\n", 11);
         exit(1);
     }
 
-    // Parse keylength argument
     char *endptr;
-    long keyLength = strtol(argv[1], &endptr, 10);
-
-    // Error checking for strtol
-    if (*endptr != '\0' || keyLength <= 0) {
-        fprintf(stderr, "Error: keylength must be a positive integer\n");
+    long key_length = strtol(argv[1], &endptr, 10);
+    if (*endptr != '\0' || key_length <= 0) {
+        write(2, "Error: Key length must be a positive integer\n", 44);
         exit(1);
     }
 
-    // Seed the random number generator
-    srand((unsigned int) time(NULL));
+    srand((unsigned int)time(NULL));
 
-    // Generate and print key
-    for (long i = 0; i < keyLength; ++i) {
-        char c = getRandomChar();
-        printf("%c", c);
+    for (long i = 0; i < key_length; i++) {
+        char c = listofchars[rand() % 27];
+        write(1, &c, 1);
     }
 
-    // Append newline at the end
-    printf("\n");
+    char newline = '\n';
+    write(1, &newline, 1);
 
     return 0;
 }
