@@ -2,246 +2,185 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <signal.h>
 #include <sys/wait.h>
+#include <netinet/in.h>
 
-#define BUFFER_SIZE 100000
-#define MAX_CONNECTIONS 5
+#define MAX_BUFFER 150000
+#define MAX_BACKLOG 5
+#define HANDSHAKE_MSG "ENC_CLIENT"
+#define HANDSHAKE_ACK "ENC_SERVER"
 
-// Call errors and terminate the program
-void error(const char *msg) {
-    perror(msg);
+void error(const char* msg) {
+    fprintf(stderr, "%s\n", msg);
     exit(1);
 }
 
-// Converts a character to its corresponding integer value 
 int charToInt(char c) {
-    if (c == ' ') {
-        return 26;
-    }
-    return c - 'A';
+    return (c == ' ') ? 26 : c - 'A';
 }
 
-// Converts an integer back to its corresponding character
 char intToChar(int i) {
-    if (i == 26) {
-        return ' ';
-    }
-    return i + 'A';
+    return (i == 26) ? ' ' : 'A' + i;
 }
 
-// Checks if a character is valid (Uppercase or space)
-int isValidChar(char c) {
-    if (c == ' ') {
-        return 1;
+// Decrypt: (ciphertext - key + 27) % 27
+void decrypt(const char* ciphertext, const char* key, char* plaintext) {
+    for (int i = 0; ciphertext[i] != '\0'; i++) {
+        int ct = charToInt(ciphertext[i]);
+        int kt = charToInt(key[i]);
+        // Add 27 before modulo to avoid negative values
+        plaintext[i] = intToChar((ct - kt + 27) % 27);
     }
-    if (c >= 'A' && c <= 'Z') {
-        return 1;
-    }
-    return 0;
+    plaintext[strlen(ciphertext)] = '\0';
 }
 
-// Decrypt message using key with OTP logic
-void decrypt(char message[], char key[]) {
-    int i;
-    for (i = 0; message[i] != '\n' && message[i] != '\0'; i++) {
-        int mVal = charToInt(message[i]);
-        int kVal = charToInt(key[i]);
-        int diff = mVal - kVal;
-        if (diff < 0) {
-            diff += 27;
+// Safer recvUntilNewline reads one byte at a time until '\n'
+int recvUntilNewline(int sockfd, char* buffer, size_t maxLen) {
+    size_t total = 0;
+    while (total < maxLen - 1) {
+        char ch;
+        ssize_t r = recv(sockfd, &ch, 1, 0);
+        if (r <= 0) return 0;  // Connection closed or error
+        if (ch == '\n') {
+            buffer[total] = '\0';
+            return 1;
         }
-        message[i] = intToChar(diff);
+        buffer[total++] = ch;
     }
-    message[i] = '\0'; // Null terminate decrypted message
+    buffer[maxLen - 1] = '\0';
+    return 1;
 }
 
-int main(int argc, char *argv[]) {
-    int sockfd, newsockfd, portnum, optval;
-    socklen_t clientlen;
-    struct sockaddr_in server_addr, client_addr;
+ssize_t sendAll(int sockfd, const char* buffer, size_t length) {
+    size_t total = 0;
+    while (total < length) {
+        ssize_t sent = send(sockfd, buffer + total, length - total, 0);
+        if (sent <= 0) return -1;
+        total += sent;
+    }
+    return total;
+}
 
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
-        exit(EXIT_FAILURE);
+void setupAddressStruct(struct sockaddr_in* address, int portNumber) {
+    memset((char*) address, '\0', sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+    address->sin_addr.s_addr = INADDR_ANY;
+}
+
+void handleClient(int connectionSocket) {
+    char buffer[MAX_BUFFER], key[MAX_BUFFER], plaintext[MAX_BUFFER];
+
+    // Step 1: Handshake
+    memset(buffer, 0, sizeof(buffer));
+    if (!recvUntilNewline(connectionSocket, buffer, sizeof(buffer))) {
+        fprintf(stderr, "dec_server: ERROR reading handshake\n");
+        close(connectionSocket);
+        exit(1);
+    }
+    if (strcmp(buffer, HANDSHAKE_MSG) != 0) {
+        fprintf(stderr, "dec_server: ERROR invalid client\n");
+        close(connectionSocket);
+        exit(1);
     }
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-        error("dec_server: ERROR opening socket");
+    // Send handshake ACK with newline
+    char handshakeAckWithNewline[64];
+    snprintf(handshakeAckWithNewline, sizeof(handshakeAckWithNewline), "%s\n", HANDSHAKE_ACK);
+    if (sendAll(connectionSocket, handshakeAckWithNewline, strlen(handshakeAckWithNewline)) < 0) {
+        fprintf(stderr, "dec_server: ERROR sending handshake ack\n");
+        close(connectionSocket);
+        exit(1);
+    }
 
-    optval = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int));
+    // Step 2: Receive ciphertext
+    memset(buffer, 0, sizeof(buffer));
+    if (!recvUntilNewline(connectionSocket, buffer, sizeof(buffer))) {
+        fprintf(stderr, "dec_server: ERROR reading ciphertext\n");
+        close(connectionSocket);
+        exit(1);
+    }
+    strcpy(plaintext, buffer);  // Temporarily store ciphertext in plaintext buffer
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    portnum = atoi(argv[1]);
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(portnum);
+    // Step 3: Receive key
+    memset(key, 0, sizeof(key));
+    if (!recvUntilNewline(connectionSocket, key, sizeof(key))) {
+        fprintf(stderr, "dec_server: ERROR reading key\n");
+        close(connectionSocket);
+        exit(1);
+    }
 
-    if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
+    // Validate key length
+    if (strlen(key) < strlen(plaintext)) {
+        fprintf(stderr, "dec_server: ERROR key too short\n");
+        close(connectionSocket);
+        exit(1);
+    }
+
+    // Step 4: Decrypt ciphertext using key
+    char decrypted[MAX_BUFFER];
+    memset(decrypted, 0, sizeof(decrypted));
+    decrypt(plaintext, key, decrypted);
+    strcat(decrypted, "\n");
+
+    // Step 5: Send decrypted plaintext
+    if (sendAll(connectionSocket, decrypted, strlen(decrypted)) < 0) {
+        fprintf(stderr, "dec_server: ERROR sending decrypted text\n");
+        close(connectionSocket);
+        exit(1);
+    }
+
+    close(connectionSocket);
+    exit(0);
+}
+
+int main(int argc, char* argv[]) {
+    int listenSocketFD, connectionSocketFD;
+    socklen_t sizeOfClientInfo;
+    struct sockaddr_in serverAddress, clientAddress;
+
+    if (argc < 2) {
+        fprintf(stderr, "USAGE: %s port\n", argv[0]);
+        exit(1);
+    }
+
+    listenSocketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocketFD < 0) error("dec_server: ERROR opening socket");
+
+    int yes = 1;
+    if (setsockopt(listenSocketFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) < 0)
+        error("dec_server: ERROR on setsockopt");
+
+    setupAddressStruct(&serverAddress, atoi(argv[1]));
+
+    if (bind(listenSocketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0)
         error("dec_server: ERROR on binding");
 
-    listen(sockfd, MAX_CONNECTIONS);
-
-    int activeConnections = 0;
+    listen(listenSocketFD, MAX_BACKLOG);
 
     while (1) {
-        clientlen = sizeof(client_addr);
-        newsockfd = accept(sockfd, (struct sockaddr*)&client_addr, &clientlen);
-
-        if (newsockfd < 0) {
+        sizeOfClientInfo = sizeof(clientAddress);
+        connectionSocketFD = accept(listenSocketFD, (struct sockaddr*)&clientAddress, &sizeOfClientInfo);
+        if (connectionSocketFD < 0) {
             fprintf(stderr, "dec_server: ERROR on accept\n");
             continue;
         }
 
-        // Wait if too many active connections
-        while (activeConnections >= MAX_CONNECTIONS) {
-            pause(); // Wait for child to finish
-        }
-
         pid_t pid = fork();
         if (pid < 0) {
-            fprintf(stderr, "dec_server: ERROR forking\n");
-            close(newsockfd);
-            continue;
-        }
-
-        if (pid == 0) {
-            // Child process
-            close(sockfd);
-
-            char buffer[BUFFER_SIZE];
-            memset(buffer, 0, sizeof(buffer));
-
-            // --- Read authorization string ---
-            char clientAuth[32];
-            memset(clientAuth, 0, sizeof(clientAuth));
-            ssize_t authRead = read(newsockfd, clientAuth, sizeof(clientAuth) - 1);
-            if (authRead < 0) {
-                perror("dec_server: ERROR reading auth");
-                exit(1);
-            }
-            // Trim trailing newline or carriage return
-            for (ssize_t i = 0; i < authRead; i++) {
-                if (clientAuth[i] == '\n' || clientAuth[i] == '\r') {
-                    clientAuth[i] = '\0';
-                    break;
-                }
-            }
-
-            if (strcmp(clientAuth, "dec_bs") != 0) {
-                char response[] = "invalid";
-                write(newsockfd, response, strlen(response));
-                exit(2);
-            } else {
-                char response[] = "dec_d_bs";
-                write(newsockfd, response, strlen(response));
-            }
-
-            // --- Read ciphertext and key until two newlines are found ---
-            char *keyStart = NULL;
-            int bytes_remaining = sizeof(buffer);
-            char *p = buffer;
-            int newlines = 0;
-            ssize_t bytesRead;
-
-            while ((bytesRead = read(newsockfd, p, bytes_remaining)) > 0) {
-                for (ssize_t i = 0; i < bytesRead; i++) {
-                    if (p[i] == '\n') {
-                        newlines++;
-                        if (newlines == 1) {
-                            keyStart = p + i + 1;
-                        }
-                    }
-                }
-                if (newlines == 2) break;
-                p += bytesRead;
-                bytes_remaining -= bytesRead;
-                if (bytes_remaining <= 0) {
-                    fprintf(stderr, "dec_server: ERROR buffer overflow\n");
-                    exit(1);
-                }
-            }
-            if (bytesRead < 0) {
-                perror("dec_server: ERROR reading from socket");
-                exit(1);
-            }
-
-            // Separate ciphertext and key strings
-            char message[BUFFER_SIZE], key[BUFFER_SIZE];
-            memset(message, 0, sizeof(message));
-            memset(key, 0, sizeof(key));
-
-            if (keyStart == NULL) {
-                fprintf(stderr, "dec_server: ERROR input missing key\n");
-                exit(1);
-            }
-
-            int msgLen = (int)(keyStart - buffer - 1); // exclude newline before key
-            if (msgLen < 0) {
-                fprintf(stderr, "dec_server: ERROR parsing input\n");
-                exit(1);
-            }
-
-            strncpy(message, buffer, msgLen);
-            message[msgLen] = '\0'; // null terminate message
-            strcpy(key, keyStart);
-
-            int keyLen = strlen(key);
-            // Remove trailing newline from key if present
-            if (keyLen > 0 && key[keyLen - 1] == '\n') {
-                key[keyLen - 1] = '\0';
-                keyLen--;
-            }
-
-            // Validate ciphertext chars
-            for (int i = 0; i < msgLen; i++) {
-                if (!isValidChar(message[i])) {
-                    fprintf(stderr, "dec_server: ERROR invalid char in ciphertext\n");
-                    exit(1);
-                }
-            }
-            // Validate key chars
-            for (int i = 0; i < keyLen; i++) {
-                if (!isValidChar(key[i])) {
-                    fprintf(stderr, "dec_server: ERROR invalid char in key\n");
-                    exit(1);
-                }
-            }
-
-            // Check key length
-            if (keyLen < msgLen) {
-                fprintf(stderr, "dec_server: ERROR key shorter than ciphertext\n");
-                exit(1);
-            }
-
-            // Perform decryption
-            decrypt(message, key);
-
-            // Write decrypted message back to client (no trailing nulls)
-            ssize_t written = write(newsockfd, message, strlen(message));
-            if (written < 0) {
-                perror("dec_server: ERROR writing to socket");
-                exit(1);
-            }
-
-            close(newsockfd);
-            exit(0);
+            fprintf(stderr, "dec_server: ERROR on fork\n");
+            close(connectionSocketFD);
+        } else if (pid == 0) {
+            close(listenSocketFD);
+            handleClient(connectionSocketFD);
         } else {
-            // Parent process
-            activeConnections++;
-            // Reap any finished child processes to reduce activeConnections
-            while (waitpid(-1, NULL, WNOHANG) > 0) {
-                activeConnections--;
-            }
-            close(newsockfd);
+            close(connectionSocketFD);
+            while (waitpid(-1, NULL, WNOHANG) > 0);
         }
     }
 
-    close(sockfd);
+    close(listenSocketFD);
     return 0;
 }
