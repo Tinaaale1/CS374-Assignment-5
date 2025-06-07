@@ -8,9 +8,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-#define MAX_BUFFER 1000
+#define BUFFER_SIZE 1000
 
 // Print formatted error message and exit with status code +
+
 void error(int exitCode, const char *message) {
     fprintf(stderr, "Client error: %s\n", message);
     exit(exitCode);
@@ -32,7 +33,7 @@ void setupAddressStruct(struct sockaddr_in* address,
     if (hostInfo == NULL)
         error(1, "CLIENT: ERROR, no such host");
     // Copy the first IP address from the DNS entry to sin_addr.s_addr
-    memcpy(&address->sin_addr.s_addr, 
+    memcpy((char*) &address->sin_addr.s_addr, 
         hostInfo->h_addr_list[0], 
         hostInfo->h_length);
 }
@@ -43,6 +44,7 @@ char* loadFile(const char* filepath) {
     FILE* f = fopen(filepath, "r");
     if (!f)
         error(1, "Cannot open file");
+
     size_t capacity = 1024;
     // Track how many characters have been read
     size_t length = 0;
@@ -54,32 +56,26 @@ char* loadFile(const char* filepath) {
     }
 
     int ch;
-    // Reads one charcter at a time until EOF
+    // Read one character at a time from file until end of file
     while ((ch = fgetc(f)) != EOF) {
-        // Checks if the character read is valid 
-        if (ch < 'A') {
-            // Checks if the character is not a space and not a newline
-            if (ch != ' ' && ch != '\n') {
-                free(data);
-                fclose(f);
-                error(1, "Invalid character in file");
-            }
-        } else {
-            // Characters greater than Z are invalid 
-            if (ch > 'Z') {
-                if (ch != ' ' && ch != '\n') {
-                    free(data);
-                    fclose(f);
-                    error(1, "Invalid character in file");
-                }
-            }
-        // Skip newline characters 
-        if (ch == '\n') {
-            continue;
+        // Checks if the character is uppercase, space, or newline
+        int isUppercase = (ch >= 'A') && (ch <= 'Z');
+        int isSpace = (ch == ' ');
+        int isNewline = (ch == '\n');
+        // If the character is not valid, free memory and exit with error 
+        if (!isUppercase && !isSpace && !isNewline) {
+            free(data);
+            fclose(f);
+            error(1, "Invalid character in file");
         }
-        // Checks if the buffer needs to be resized to add more characters
+
+        // Skip newline characters 
+        if (isNewline) 
+            continue;
+
+        // Checks if there is enough space to store more characters
         if (length + 1 >= capacity) {
-            // If not enoguh then double the capacity
+            // Double capacity for more characters
             capacity *= 2;
             char* newData = realloc(data, capacity);
             if (!newData) {
@@ -87,111 +83,138 @@ char* loadFile(const char* filepath) {
                 fclose(f);
                 error(1, "Memory allocation failed");
             }
-            // Assign the resized buffer back to the data pointer
+            // Update data to point the new memory 
             data = newData;
         }
+        // Store the valid character into data 
         data[length] = (char)ch;
+        // Increment length by 1 for the next character
         length++;
     }
-}
-    // Null-terminate the string
+
+    // Adds the null terminator the end of the string stored
     data[length] = '\0';
 
     fclose(f);
     return data;
 }
-
 void sendData(int connectionSocket, char* data) {
+    // Calculate the number of characters 
     int len = strlen(data);
-    // Sends the length of data over the socket to receiver 
-    if (send(connectionSocket, &len, sizeof(len), 0) < 0)
+    // Sends the length of the data  
+    // If negative, error occurred 
+    int charsWritten = send(connectionSocket, &len, sizeof(len), 0);
+    // If negative, error occurred 
+    if (charsWritten < 0) {
         error(1, "CLIENT: ERROR writing to socket");
-    // Keep track of how many bytes have been sent
+    }
+    // Track how many bytes already sent
     int totalSent = 0;
-    // Loops until all bytes of the string are sent 
+    // Loop until the total number of bytes sent is equal to the length 
     while (totalSent < len) {
         int bytesToSend;
-        if (len - totalSent < MAX_BUFFER) {
-            bytesToSend = len - totalSent;
-        } else {
-            bytesToSend = MAX_BUFFER;
-        }
+            if (len - totalSent < BUFFER_SIZE) {
+                bytesToSend = len - totalSent;
+            } else {
+                bytesToSend = BUFFER_SIZE;
+            }
         // Send message through the socket
-        int bytesSent = send(connectionSocket, data + totalSent, bytesToSend, 0);
-        if (bytesSent < 0)
+        charsWritten = send(connectionSocket, data + totalSent, bytesToSend, 0);
+        if (charsWritten < 0) {
             error(1, "CLIENT: WARNING: Not all data written to socket!");
+        }
         // Updates how many bytes were successfully sent
-        totalSent += bytesSent;
+        totalSent += charsWritten;
     }
 }
-
-char* receiveAll(int connectionSocket) {
+char* receive(int connectionSocket) {
     int len;
+    // Calls recv() to read data from the socket
+    // If negative value then error occurred
     if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
-        error(1, "Failed to read message length");
+        error(1, "CLIENT: ERROR reading from socket");
+    
 
-    char* buffer = malloc(len + 1);
-    if (!buffer)
-        error(1, "Memory allocation failed");
+    // Allocate memory to store incoming messsage
+    char* result = malloc(len + 1);
+    if (!result)
+        error(1, "Unable to allocate memory");
 
-    int totalSent = 0;
-    while (totalSent < len) {
-        int chunk = len - totalSent < MAX_BUFFER - 1 ? len - totalSent : MAX_BUFFER - 1;
-        int bytesRead = recv(connectionSocket, buffer + totalSent, chunk, 0);
-        if (bytesRead < 0)
-            error(1, "Failed to receive data");
-        totalSent += bytesRead;
+    int charsRead;
+    // Loop to read data for entire message
+    for (int i = 0; i < len; i += charsRead) {
+        int totalRead;
+        if (len - i > BUFFER_SIZE - 1) {
+            totalRead = BUFFER_SIZE - 1;
+        } else {
+            totalRead = len - i;
+        }
+
+        charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
+        if (charsRead < 0)
+            error(1, "ERROR reading from socket");
     }
-    buffer[len] = '\0';
-    return buffer;
+
+    result[len] = '\0';
+    return result;
 }
 
-void performHandshake(int connectionSocket) {
+// Takes a socket descriptor that represents the network connection
+void verifyServer(int connectionSocket) {
+    // Hanshake identifier 
     char id[] = "enc";
     char response[4] = {0};
-
+    // Sends handshake message to the server via the socket
     if (send(connectionSocket, id, sizeof(id), 0) < 0)
         error(1, "Failed to send handshake");
-
+    // Receives handshake response from server
     if (recv(connectionSocket, response, sizeof(response), 0) < 0)
         error(1, "Failed to receive handshake");
-
+    // Compares the "enc" string with the received response
     if (strcmp(id, response) != 0) {
         close(connectionSocket);
         error(2, "Connected to incompatible server");
     }
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, const char* argv[]) {
+    int socketFD, charsWritten, charsRead;
+    // Checks if the user provided program name, plaintext file, key file, and port number
     if (argc != 4)
         error(1, "Usage: ./enc_client <plaintext> <key> <portNumber>");
-
-    char* text = loadFile(argv[1]);
+    // Calls loadFile() to read the plaintext file
+    char* plaintext = loadFile(argv[1]);
+    // Calls loadFile() to read the key file
     char* key = loadFile(argv[2]);
 
-    if (strlen(key) < strlen(text))
+    if (strlen(key) < strlen(plaintext))
         error(1, "Key is shorter than plaintext");
 
-    int connectionSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (connectionSocket < 0)
-        error(1, "Socket creation failed");
+    // Create the socket that will listen for connections
+    socketFD = socket(AF_INET, SOCK_STREAM, 0); 
+    if (socketFD < 0){
+        error(1, "CLIENT: ERROR opening socket");
+    }
+    struct sockaddr_in serverAddress;
+    // Set up the server address struct 
+    setupAddressStruct(&serverAddress, atoi(argv[3]), "localhost");
+    
+    // Connect to the server
+    if (connect(socketFD, 
+        (struct sockaddr*)&serverAddress, 
+        sizeof(serverAddress)) < 0)
+        error(1, "CLIENT: ERROR connecting");
 
-    struct sockaddr_in address;
-    setupAddressStruct(&address, atoi(argv[3]), "localhost");
-
-    if (connect(connectionSocket, (struct sockaddr*)&address, sizeof(address)) < 0)
-        error(1, "Failed to connect to server");
-
-    performHandshake(connectionSocket);
-    sendData(connectionSocket, text);
-    sendData(connectionSocket, key);
-
-    char* encrypted = receiveAll(connectionSocket);
+    verifyServer(socketFD);
+    sendData(socketFD, plaintext);
+    sendData(socketFD, key);
+    // Prints the encrypted ciphertext 
+    char* encrypted = receive(socketFD);
     printf("%s\n", encrypted);
 
-    free(text);
+    free(plaintext);
     free(key);
     free(encrypted);
-    close(connectionSocket);
+    close(socketFD);
     return 0;
 }

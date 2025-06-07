@@ -176,7 +176,6 @@ int main(int argc, const char * argv[]) {
     error(1, "ERROR on binding");
 }
 
-
     listen(listenSocket, 5);
 
     while (1) {
