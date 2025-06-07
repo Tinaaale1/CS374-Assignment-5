@@ -13,7 +13,8 @@ void error(int exitCode, const char *message) {
     exit(exitCode);
 }
 
-// Set up the address struct for the server socket
+// From server.c 
+// Set up the address struct 
 void setupAddressStruct(struct sockaddr_in* address, int portNumber){
     // Clear out the address struct 
     memset((char*) address, '\0', sizeof(*address));
