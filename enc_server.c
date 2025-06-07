@@ -7,116 +7,183 @@
 
 #define BUFFER_SIZE 1000
 
-int error(int exitCode, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    fprintf(stderr, "Client error: ");
-    vfprintf(stderr, format, args);
-    fprintf(stderr, "\n");
-    va_end(args);
+// Print formatted error message and exit with status code 
+void error(int exitCode, const char *message) {
+    fprintf(stderr, "Client error: %s\n", message);
     exit(exitCode);
 }
 
+// Set up the address struct for the server socket
 void setupAddressStruct(struct sockaddr_in* address, int portNumber){
+    // Clear out the address struct 
     memset((char*) address, '\0', sizeof(*address));
+    // The address should be network capable
     address->sin_family = AF_INET;
+    // Store the port number
     address->sin_port = htons(portNumber);
+    // Allow a client at any address to connect to this server 
     address->sin_addr.s_addr = INADDR_ANY;
 }
 
-void sendData(int sock, char* data) {
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
+void sendData(int connectionSocket, char* data) {
+    // Calculate the number of characters 
     int len = (int)strlen(data);
-    if (send(sock, &len, sizeof(len), 0) < 0)
-        error(1, "Unable to write to socket");
-
-    int charsSent;
-    for (int i = 0; i < len; i += charsSent) {
-        int remaining = len - i;
-        charsSent = remaining < BUFFER_SIZE ? remaining : BUFFER_SIZE;
-        if (send(sock, data + i, charsSent, 0) < 0)
-            error(1, "Unable to write to socket");
+    // Sends the length of the data  
+    int charsWritten = send(connectionSocket, &len, sizeof(len), 0);
+    // If negative, error occurred 
+    if (charsWritten < 0) {
+        error(1, "CLIENT: ERROR writing to socket");
+    }
+    // Track how many bytes already sent
+    int totalSent = 0;
+    // Loop until the total number of bytes sent is equal to the length 
+    while (totalSent < len) {
+        // Determine how many bytes to send
+        int bytesToSend;
+            if (len - totalSent < BUFFER_SIZE) {
+                bytesToSend = len - totalSent;
+            } else {
+                bytesToSend = BUFFER_SIZE;
+            }
+        // Send message through the socket
+        charsWritten = send(connectionSocket, data + totalSent, bytesToSend, 0);
+        if (charsWritten < 0) {
+            error(1, "CLIENT: WARNING: Not all data written to socket!");
+        }
+        // Updates how many bytes were successfully sent
+        totalSent += charsWritten;
     }
 }
 
-char* receive(int sock) {
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
+char* receive(int connectionSocket) {
     int len;
-    if (recv(sock, &len, sizeof(len), 0) < 0)
-        error(1, "Unable to read from socket");
+    // Calls recv() to read data from the socket
+    // If negative value then error occurred
+    if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
+        error(1, "CLIENT: ERROR reading from socket");
+    
 
+    // Allocate memory to store incoming messsage
     char* result = malloc(len + 1);
     if (!result)
         error(1, "Unable to allocate memory");
 
     int charsRead;
+    // Loop to read data for entire message
     for (int i = 0; i < len; i += charsRead) {
-        int size = len - i > BUFFER_SIZE - 1 ? BUFFER_SIZE - 1 : len - i;
-        charsRead = (int)recv(sock, result + i, size, 0);
+        int totalRead;
+        if (len - i > BUFFER_SIZE - 1) {
+            totalRead = BUFFER_SIZE - 1;
+        } else {
+            totalRead = len - i;
+        }
+
+        charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
         if (charsRead < 0)
-            error(1, "Unable to read from socket");
+            error(1, "ERROR reading from socket");
     }
 
     result[len] = '\0';
     return result;
 }
 
-void validate(int sock) {
+// Verify the client 
+void verifyClient(int connectionSocket) {
     char client[4], server[4] = "enc";
     memset(client, '\0', sizeof(client));
 
-    if (recv(sock, client, sizeof(client), 0) < 0)
-        error(1, "Unable to read from socket");
-
-    if (send(sock, server, sizeof(server), 0) < 0)
-        error(1, "Unable to write to socket");
-
+    // Receives a message up to 4 bytes from the client through the socket
+    if (recv(connectionSocket, client, sizeof(client), 0) < 0)
+        error(1, "ERROR reading from socket");
+    // Sneds back to client 
+    // Handshake message to verify client
+    if (send(connectionSocket, server, sizeof(server), 0) < 0)
+        error(1, "ERROR writing to socket");
+    // Compares the received client string to the expected "enc" string 
     if (strcmp(client, server)) {
-        close(sock);
-        error(2, "Client not enc_client");
+        // If strings do not match, close socket
+        close(connectionSocket);
+        error(2, "Rejected connection: Client not validated");
     }
 }
 
-void handleOtpComm(int sock) {
-    char* text = receive(sock);
-    char* key = receive(sock);
-    int len = (int)strlen(text);
+void otpEncryption(int connectionSocket) {
+    // Read a plaintext message from the client
+    char* plaintext = receive(connectionSocket);
+    char* key = receive(connectionSocket);
+    // Calculates the length of the plaintext message
+    // Key is the same length  
+    int len = (int)strlen(plaintext);
     char* result = (char*) malloc(len + 1);
 
     for (int i = 0; i < len; i++) {
-        int txtVal = text[i] == ' ' ? 26 : text[i] - 'A';
-        int keyVal = key[i] == ' ' ? 26 : key[i] - 'A';
-        int encVal = (txtVal + keyVal) % 27;
-        result[i] = encVal == 26 ? ' ' : encVal + 'A';
+        // Converts the text into a number between 0 and 26
+        int text;
+        if (plaintext[i] == ' ') {
+            text = 26;
+        } else {
+            text = plaintext[i] - 'A';
+        }
+        // Converts the character into a number between 0 and 26
+        int keyVal;
+        if (key[i] == ' ') {
+            keyVal = 26;
+        } else {
+            keyVal = key[i] - 'A';
+        }
+        // Wrap around if the result is over 26
+        int encryptVal = (text + keyVal) % 27;
+        // If 26 then result is a space
+        if (encryptVal == 26) {
+            result[i] = ' ';
+        } else {
+            result[i] = encryptVal + 'A';
+        }
     }
+    // Adds a null terminator to the end of the encrypted string
     result[len] = '\0';
-
-    sendData(sock, result);
+    // Sends the encrypted message back to the client
+    sendData(connectionSocket, result);
     free(result);
-    free(text);
+    free(plaintext);
     free(key);
-    close(sock);
+    close(connectionSocket);
+}
+// For port
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397 
+int main(int argc, const char * argv[]) {
+    // Checks if the user provided a port number 
+    if (argc < 2) {
+        fprintf(stderr, "USAGE: %s port\n", argv[0]);
+        exit(1);
+    }
+    // Create a socket
+    int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocket < 0)
+        error(1, "Error opening socket");
+
+    // From server.c
+    struct sockaddr_in serverAddress, clientAddress;
+    socklen_t sizeOfClientInfo = sizeof(clientAddress);
+    setupAddressStruct(&serverAddress, atoi(argv[1]));
+
+    if (bind(listenSocket, 
+         (struct sockaddr *)&serverAddress, 
+         sizeof(serverAddress)) < 0){
+    error(1, "ERROR on binding");
 }
 
-int main(int argc, const char * argv[]) {
-    if (argc < 2)
-        error(1, "USAGE: %s port\n", argv[0]);
 
-    int listenSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenSock < 0)
-        error(1, "Unable to open socket");
-
-    struct sockaddr_in server, client;
-    socklen_t clientSize = sizeof(client);
-    setupAddressStruct(&server, atoi(argv[1]));
-
-    if (bind(listenSock, (struct sockaddr *) &server, sizeof(server)) < 0)
-        error(1, "Unable to bind socket");
-
-    listen(listenSock, 5);
+    listen(listenSocket, 5);
 
     while (1) {
-        int sock = accept(listenSock, (struct sockaddr *)&client, &clientSize);
-        if (sock < 0)
-            error(1, "Unable to accept connection");
+        int connectionSocket = accept(listenSocket, 
+            (struct sockaddr *)&clientAddress, 
+            &sizeOfClientInfo);
+        if (connectionSocket < 0)
+            error(1, "ERROR on accept");
 
         int pid = fork();
         switch (pid) {
@@ -124,15 +191,14 @@ int main(int argc, const char * argv[]) {
                 error(1, "Unable to fork child");
                 break;
             case 0:
-                validate(sock);
-                handleOtpComm(sock);
+                verifyClient(connectionSocket);
+                otpEncryption(connectionSocket);
                 exit(0);
             default:
-                close(sock);
+                close(connectionSocket);
         }
     }
 
-    close(listenSock);
+    close(listenSocket);
     return 0;
 }
-
