@@ -1,217 +1,147 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <sys/types.h>  
-#include <sys/socket.h> 
-#include <netdb.h>      
-#include <netinet/in.h>
-#include <errno.h>
-#include <signal.h>
-#include <sys/wait.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
-#define MAX_BUFFER 150000
+#define MAX_BUFFER 1000
 
-// Error exit function
-void error_exit(const char *msg, int code) {
-    fprintf(stderr, "%s\n", msg);
+void reportError(int code, const char* msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    fprintf(stderr, "enc_client error: ");
+    vfprintf(stderr, msg, args);
+    fprintf(stderr, "\n");
+    va_end(args);
     exit(code);
 }
 
-// SIGCHLD handler to reap zombie child processes
-void sigchld_handler(int s) {
-    int saved_errno = errno;
-    while(waitpid(-1, NULL, WNOHANG) > 0);
-    errno = saved_errno;
+void initServerAddress(struct sockaddr_in* serverAddr, int port, const char* hostname) {
+    memset(serverAddr, 0, sizeof(*serverAddr));
+    serverAddr->sin_family = AF_INET;
+    serverAddr->sin_port = htons(port);
+    
+    struct hostent* host = gethostbyname(hostname);
+    if (!host)
+        reportError(1, "Unknown host %s", hostname);
+
+    memcpy(&serverAddr->sin_addr.s_addr, host->h_addr_list[0], host->h_length);
 }
 
-// Encrypt message
-void encrypt_message(char* plaintext, char* key, char* ciphertext) {
-    int pt_len = strlen(plaintext);
-    int key_len = strlen(key);
+char* loadFile(const char* filepath) {
+    FILE* f = fopen(filepath, "r");
+    if (!f)
+        reportError(1, "Cannot open file: %s", filepath);
 
-    for (int i = 0; i < pt_len && i < key_len; i++) {
-        int plain_num = (plaintext[i] == ' ') ? 26 : (plaintext[i] - 'A');
-        int key_num = (key[i] == ' ') ? 26 : (key[i] - 'A');
+    fseek(f, 0, SEEK_END);
+    size_t len = ftell(f) - 1;
+    rewind(f);
 
-        int sum = (plain_num ^ key_num) + 2 * (plain_num & key_num);
-        int encoded_digit = sum % 27;
+    char* data = malloc(len + 1);
+    if (!data)
+        reportError(1, "Memory allocation failed");
 
-        ciphertext[i] = (encoded_digit == 26) ? ' ' : (char)(encoded_digit + 'A');
-    }
-    ciphertext[pt_len] = '\0';
-}
-
-// Read exactly length bytes from sockfd into buffer
-ssize_t recv_all(int sockfd, char *buffer, size_t length) {
-    size_t total = 0;
-    while (total < length) {
-        ssize_t n = recv(sockfd, buffer + total, length - total, 0);
-        if (n <= 0) return n;
-        total += n;
-    }
-    return total;
-}
-
-// Send null-terminated string plus newline
-ssize_t send_line(int sockfd, const char *msg) {
-    size_t len = strlen(msg);
-    char buf[len + 2];
-    strcpy(buf, msg);
-    buf[len] = '\n';
-    buf[len+1] = '\0';
-    return send(sockfd, buf, len + 1, 0);  // send including newline but not null terminator
-}
-
-// Receive a line (ending in \n) into buffer, replacing \n with '\0'
-ssize_t recv_line(int sockfd, char *buffer, size_t max_len) {
-    size_t i = 0;
-    while (i < max_len - 1) {
-        char c;
-        ssize_t n = recv(sockfd, &c, 1, 0);
-        if (n <= 0) return n;
-        if (c == '\n') break;
-        buffer[i++] = c;
-    }
-    buffer[i] = '\0';
-    return i;
-}
-
-int main(int argc, char *argv[]) {
-    if (argc != 2) error_exit("Usage: enc_server port", 1);
-
-    int port_number = atoi(argv[1]);
-    int listen_fd, client_fd;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
-
-    // Setup SIGCHLD handler
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(1);
-    }
-
-    // Create socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) error_exit("Error opening socket", 1);
-
-    // Set SO_REUSEADDR
-    int yes = 1;
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
-        perror("setsockopt");
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port_number);
-
-    if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-        error_exit("Error on binding", 1);
-
-    if (listen(listen_fd, 5) < 0)
-        error_exit("Error on listen", 1);
-
-    while (1) {
-        client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            perror("Error on accept");
-            continue;
+    for (size_t i = 0; i < len; i++) {
+        char ch = fgetc(f);
+        if ((ch < 'A' || ch > 'Z') && ch != ' ') {
+            free(data);
+            fclose(f);
+            reportError(1, "Invalid character in %s: %c (ASCII %d)", filepath, ch, ch);
         }
-
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("Error on fork");
-            close(client_fd);
-            continue;
-        }
-
-        if (pid == 0) {
-            close(listen_fd);
-
-            // Step 1: Receive client ID line (with \n)
-            char buffer[100];
-            ssize_t n = recv_line(client_fd, buffer, sizeof(buffer));
-            if (n <= 0) {
-                close(client_fd);
-                exit(1);
-            }
-
-            // Verify client ID
-            if (strcmp(buffer, "enc_client") != 0) {
-                send_line(client_fd, "reject");
-                close(client_fd);
-                exit(2);
-            }
-
-            // Accept client
-            send_line(client_fd, "accept");
-
-            // Step 2: Receive plaintext size line
-            n = recv_line(client_fd, buffer, sizeof(buffer));
-            if (n <= 0) {
-                close(client_fd);
-                exit(1);
-            }
-            int pt_size = atoi(buffer);
-
-            // Ack plaintext size
-            send_line(client_fd, "size_received");
-
-            // Step 3: Receive plaintext bytes
-            char plaintext[MAX_BUFFER];
-            if (recv_all(client_fd, plaintext, pt_size) <= 0) {
-                close(client_fd);
-                exit(1);
-            }
-            plaintext[pt_size] = '\0';
-
-            // Ack plaintext received
-            send_line(client_fd, "size_received");
-
-            // Step 4: Receive key size line
-            n = recv_line(client_fd, buffer, sizeof(buffer));
-            if (n <= 0) {
-                close(client_fd);
-                exit(1);
-            }
-            int key_size = atoi(buffer);
-
-            // Ack key size
-            send_line(client_fd, "size_received");
-
-            // Step 5: Receive key bytes
-            char key[MAX_BUFFER];
-            if (recv_all(client_fd, key, key_size) <= 0) {
-                close(client_fd);
-                exit(1);
-            }
-            key[key_size] = '\0';
-
-            // Encrypt
-            char ciphertext[MAX_BUFFER];
-            encrypt_message(plaintext, key, ciphertext);
-
-            // Step 6: Send ciphertext bytes
-            size_t ct_len = strlen(ciphertext);
-            size_t total_sent = 0;
-            while (total_sent < ct_len) {
-                ssize_t sent = send(client_fd, ciphertext + total_sent, ct_len - total_sent, 0);
-                if (sent <= 0) break;
-                total_sent += sent;
-            }
-
-            close(client_fd);
-            exit(0);
-        } else {
-            close(client_fd);
-        }
+        data[i] = ch;
     }
+    data[len] = '\0';
 
-    close(listen_fd);
+    fclose(f);
+    return data;
+}
+
+void sendAll(int sockfd, const char* data) {
+    int len = strlen(data);
+    if (send(sockfd, &len, sizeof(len), 0) < 0)
+        reportError(1, "Failed to send data length");
+
+    int total = 0;
+    while (total < len) {
+        int toSend = len - total < MAX_BUFFER ? len - total : MAX_BUFFER;
+        int bytesSent = send(sockfd, data + total, toSend, 0);
+        if (bytesSent < 0)
+            reportError(1, "Failed to send data");
+        total += bytesSent;
+    }
+}
+
+char* receiveAll(int sockfd) {
+    int len;
+    if (recv(sockfd, &len, sizeof(len), 0) < 0)
+        reportError(1, "Failed to read message length");
+
+    char* buffer = malloc(len + 1);
+    if (!buffer)
+        reportError(1, "Memory allocation failed");
+
+    int total = 0;
+    while (total < len) {
+        int chunk = len - total < MAX_BUFFER - 1 ? len - total : MAX_BUFFER - 1;
+        int bytesRead = recv(sockfd, buffer + total, chunk, 0);
+        if (bytesRead < 0)
+            reportError(1, "Failed to receive data");
+        total += bytesRead;
+    }
+    buffer[len] = '\0';
+    return buffer;
+}
+
+void performHandshake(int sockfd) {
+    char id[] = "enc";
+    char response[4] = {0};
+
+    if (send(sockfd, id, sizeof(id), 0) < 0)
+        reportError(1, "Failed to send handshake");
+
+    if (recv(sockfd, response, sizeof(response), 0) < 0)
+        reportError(1, "Failed to receive handshake");
+
+    if (strcmp(id, response) != 0) {
+        close(sockfd);
+        reportError(2, "Connected to incompatible server");
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 4)
+        reportError(1, "Usage: %s <plaintext> <key> <port>", argv[0]);
+
+    char* text = loadFile(argv[1]);
+    char* key = loadFile(argv[2]);
+
+    if (strlen(key) < strlen(text))
+        reportError(1, "Key is shorter than plaintext");
+
+    int socketFD = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketFD < 0)
+        reportError(1, "Socket creation failed");
+
+    struct sockaddr_in serverAddress;
+    initServerAddress(&serverAddress, atoi(argv[3]), "localhost");
+
+    if (connect(socketFD, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0)
+        reportError(1, "Failed to connect to server");
+
+    performHandshake(socketFD);
+    sendAll(socketFD, text);
+    sendAll(socketFD, key);
+
+    char* encrypted = receiveAll(socketFD);
+    printf("%s\n", encrypted);
+
+    free(text);
+    free(key);
+    free(encrypted);
+    close(socketFD);
     return 0;
 }
