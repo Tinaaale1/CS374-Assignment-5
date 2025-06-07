@@ -1,227 +1,138 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <sys/types.h>  
-#include <sys/socket.h> 
-#include <netdb.h>      
+#include <unistd.h>
 #include <netinet/in.h>
-#include <errno.h>
-#include <signal.h>
-#include <sys/wait.h>
 
-#define MAX_BUFFER 150000
+#define BUFFER_SIZE 1000
 
-// Error exit function
-void error_exit(const char *msg, int code) {
-    fprintf(stderr, "%s\n", msg);
-    exit(code);
+int error(int exitCode, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    fprintf(stderr, "Client error: ");
+    vfprintf(stderr, format, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+    exit(exitCode);
 }
 
-// SIGCHLD handler to reap zombie child processes
-void sigchld_handler(int s) {
-    // waitpid() might overwrite errno, so save and restore it
-    int saved_errno = errno;
-    while(waitpid(-1, NULL, WNOHANG) > 0);
-    errno = saved_errno;
+void setupAddressStruct(struct sockaddr_in* address, int portNumber){
+    memset((char*) address, '\0', sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+    address->sin_addr.s_addr = INADDR_ANY;
 }
 
-// Encryption function
-void encrypt_message(char* plaintext, char* key, char* ciphertext) {
-    int pt_len = 0, key_len = 0;
+void sendData(int sock, char* data) {
+    int len = (int)strlen(data);
+    if (send(sock, &len, sizeof(len), 0) < 0)
+        error(1, "Unable to write to socket");
 
-    while (plaintext[pt_len] != '\0') pt_len++;
-    while (key[key_len] != '\0') key_len++;
-
-    int i = 0;
-    for (; i < pt_len && i < key_len; i++) {
-        int plain_num = (plaintext[i] == ' ') ? 26 : (plaintext[i] - 'A');
-        int key_num = (key[i] == ' ') ? 26 : (key[i] - 'A');
-
-        // Encoding formula as given
-        int sum = (plain_num ^ key_num) + 2 * (plain_num & key_num);
-        int encoded_digit = sum % 27;
-
-        ciphertext[i] = (encoded_digit == 26) ? ' ' : (char)(encoded_digit + 'A');
+    int charsSent;
+    for (int i = 0; i < len; i += charsSent) {
+        int remaining = len - i;
+        charsSent = remaining < BUFFER_SIZE ? remaining : BUFFER_SIZE;
+        if (send(sock, data + i, charsSent, 0) < 0)
+            error(1, "Unable to write to socket");
     }
-    ciphertext[i] = '\0';
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s port\n", argv[0]);
-        exit(1);
+char* receive(int sock) {
+    int len;
+    if (recv(sock, &len, sizeof(len), 0) < 0)
+        error(1, "Unable to read from socket");
+
+    char* result = malloc(len + 1);
+    if (!result)
+        error(1, "Unable to allocate memory");
+
+    int charsRead;
+    for (int i = 0; i < len; i += charsRead) {
+        int size = len - i > BUFFER_SIZE - 1 ? BUFFER_SIZE - 1 : len - i;
+        charsRead = (int)recv(sock, result + i, size, 0);
+        if (charsRead < 0)
+            error(1, "Unable to read from socket");
     }
 
-    int port_number = atoi(argv[1]);
-    int listen_fd, client_fd;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    char buffer[MAX_BUFFER];
-    char key[MAX_BUFFER];
-    char ciphertext[MAX_BUFFER];
+    result[len] = '\0';
+    return result;
+}
 
-    // Setup SIGCHLD handler to reap zombies
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART; // Restart interrupted syscalls
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(1);
+void validate(int sock) {
+    char client[4], server[4] = "enc";
+    memset(client, '\0', sizeof(client));
+
+    if (recv(sock, client, sizeof(client), 0) < 0)
+        error(1, "Unable to read from socket");
+
+    if (send(sock, server, sizeof(server), 0) < 0)
+        error(1, "Unable to write to socket");
+
+    if (strcmp(client, server)) {
+        close(sock);
+        error(2, "Client not enc_client");
     }
+}
 
-    // Create socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) error_exit("Error opening socket", 1);
+void handleOtpComm(int sock) {
+    char* text = receive(sock);
+    char* key = receive(sock);
+    int len = (int)strlen(text);
+    char* result = (char*) malloc(len + 1);
 
-    // Set SO_REUSEADDR to reuse port immediately after program exit
-    int yes = 1;
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
-        perror("setsockopt(SO_REUSEADDR) failed");
-        // Not fatal; continue anyway
+    for (int i = 0; i < len; i++) {
+        int txtVal = text[i] == ' ' ? 26 : text[i] - 'A';
+        int keyVal = key[i] == ' ' ? 26 : key[i] - 'A';
+        int encVal = (txtVal + keyVal) % 27;
+        result[i] = encVal == 26 ? ' ' : encVal + 'A';
     }
+    result[len] = '\0';
 
-    // Setup address struct
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port_number);
+    sendData(sock, result);
+    free(result);
+    free(text);
+    free(key);
+    close(sock);
+}
 
-    // Bind socket
-    if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-        error_exit("Error on binding", 1);
+int main(int argc, const char * argv[]) {
+    if (argc < 2)
+        error(1, "USAGE: %s port\n", argv[0]);
 
-    // Listen for connections
-    if (listen(listen_fd, 5) < 0)
-        error_exit("Error on listen", 1);
+    int listenSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSock < 0)
+        error(1, "Unable to open socket");
+
+    struct sockaddr_in server, client;
+    socklen_t clientSize = sizeof(client);
+    setupAddressStruct(&server, atoi(argv[1]));
+
+    if (bind(listenSock, (struct sockaddr *) &server, sizeof(server)) < 0)
+        error(1, "Unable to bind socket");
+
+    listen(listenSock, 5);
 
     while (1) {
-        client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            perror("Error on accept");
-            continue;
-        }
+        int sock = accept(listenSock, (struct sockaddr *)&client, &clientSize);
+        if (sock < 0)
+            error(1, "Unable to accept connection");
 
-        // Fork a child to handle client
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("Error on fork");
-            close(client_fd);
-            continue;
-        }
-
-        if (pid == 0) {
-            // Child process
-            close(listen_fd);
-
-            // Receive client identification
-            memset(buffer, 0, sizeof(buffer));
-            int bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-            if (bytes_received < 0) {
-                perror("Error reading from socket");
-                close(client_fd);
-                exit(1);
-            }
-            buffer[bytes_received] = '\0';
-
-            // Check client ID: should be "enc_client"
-            if (strcmp(buffer, "enc_client") != 0) {
-                const char *msg = "reject";
-                send(client_fd, msg, strlen(msg), 0);
-                close(client_fd);
-                exit(2);
-            }
-
-            // Accept client
-            const char *msg = "accept";
-            send(client_fd, msg, strlen(msg), 0);
-
-            // Receive plaintext size
-            memset(buffer, 0, sizeof(buffer));
-            bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-            if (bytes_received <= 0) {
-                perror("Error reading plaintext size");
-                close(client_fd);
-                exit(1);
-            }
-            buffer[bytes_received] = '\0';
-            int plaintext_size = atoi(buffer);
-
-            // Send acknowledgment
-            const char *ack = "size_received";
-            send(client_fd, ack, strlen(ack), 0);
-
-            // Receive plaintext in chunks until full size received
-            int total_received = 0;
-            memset(buffer, 0, sizeof(buffer));
-            while (total_received < plaintext_size) {
-                bytes_received = recv(client_fd, buffer + total_received, plaintext_size - total_received, 0);
-                if (bytes_received <= 0) {
-                    perror("Error receiving plaintext");
-                    close(client_fd);
-                    exit(1);
-                }
-                total_received += bytes_received;
-            }
-            buffer[plaintext_size] = '\0';  // Null terminate plaintext
-
-            // Send acknowledgment for plaintext
-            send(client_fd, ack, strlen(ack), 0);
-
-            // Receive key size
-            memset(buffer, 0, sizeof(buffer));
-            bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-            if (bytes_received <= 0) {
-                perror("Error reading key size");
-                close(client_fd);
-                exit(1);
-            }
-            buffer[bytes_received] = '\0';
-            int key_size = atoi(buffer);
-
-            // Send acknowledgment
-            send(client_fd, ack, strlen(ack), 0);
-
-            // Receive key in chunks until full key received
-            total_received = 0;
-            memset(key, 0, sizeof(key));
-            while (total_received < key_size) {
-                bytes_received = recv(client_fd, key + total_received, key_size - total_received, 0);
-                if (bytes_received <= 0) {
-                    perror("Error receiving key");
-                    close(client_fd);
-                    exit(1);
-                }
-                total_received += bytes_received;
-            }
-            key[key_size] = '\0';
-
-            // Encrypt the message
-            encrypt_message(buffer, key, ciphertext);
-
-            // Send encrypted ciphertext
-            int ciphertext_len = strlen(ciphertext);
-            int total_sent = 0;
-            while (total_sent < ciphertext_len) {
-                int sent = send(client_fd, ciphertext + total_sent, ciphertext_len - total_sent, 0);
-                if (sent <= 0) {
-                    perror("Error sending ciphertext");
-                    break;
-                }
-                total_sent += sent;
-            }
-
-            close(client_fd);
-            exit(0);
-        } else {
-            // Parent process closes client socket and continues
-            close(client_fd);
-            // Parent loops to accept new connections
+        int pid = fork();
+        switch (pid) {
+            case -1:
+                error(1, "Unable to fork child");
+                break;
+            case 0:
+                validate(sock);
+                handleOtpComm(sock);
+                exit(0);
+            default:
+                close(sock);
         }
     }
 
-    // Cleanup: close listening socket (never reached)
-    close(listen_fd);
+    close(listenSock);
     return 0;
 }
+
