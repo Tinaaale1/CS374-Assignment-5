@@ -5,9 +5,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sys/wait.h> // For waitpid()
+#include <sys/wait.h> 
 
 #define BUFFER_CAPACITY 1000
+#define MAX_CHILDREN 5
 
 // Functions exactly like enc_server but will decrypt ciphertext
 // From server.c
