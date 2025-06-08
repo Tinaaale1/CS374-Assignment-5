@@ -66,6 +66,7 @@ char* receiveData(int connectionSocket) {
     int len;
     // Receive the length of the incoming message
     int charsRead = recv(connectionSocket, &len, sizeof(len), 0);
+    // If negative value then error occurred
     if (charsRead < 0) {
         error(1, "CLIENT: ERROR reading message length from socket");
     }
@@ -119,6 +120,7 @@ void verifyClient(int connectionSocket) {
         error(2, "CLIENT: Rejected connection: Client not validated");
     }
 }
+
 // https://en.wikipedia.org/wiki/One-time_pad
 // After verifying the connection to enc_server is coming from enc_client
 // Then this child receives plaintext and a key from enc_client via the connected socket
@@ -187,6 +189,7 @@ int main(int argc, const char * argv[]) {
          sizeof(serverAddress)) < 0){
     error(1, "ERROR on binding");
 }   
+
     // enc_server must support up to 5 concurrent socket connections running at the same time
     // Start listening for connections
     // Allow up to 5 connections to queue up
@@ -221,3 +224,4 @@ int main(int argc, const char * argv[]) {
     // Closing the listening socket
     close(listenSocket);
     return 0;
+}
