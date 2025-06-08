@@ -7,6 +7,7 @@
 
 #define BUFFER_SIZE 1000
 
+// From server.c
 // Print formatted error message and exit with status code 
 void error(int exitCode, const char *message) {
     fprintf(stderr, "Client error: %s\n", message);
@@ -64,13 +65,10 @@ char* receive(int connectionSocket) {
     // If negative value then error occurred
     if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
         error(1, "CLIENT: ERROR reading from socket");
-    
-
     // Allocate memory to store incoming messsage
     char* result = malloc(len + 1);
     if (!result)
         error(1, "Unable to allocate memory");
-
     int charsRead;
     // Loop to read data for entire message
     for (int i = 0; i < len; i += charsRead) {
@@ -80,12 +78,10 @@ char* receive(int connectionSocket) {
         } else {
             totalRead = len - i;
         }
-
         charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
         if (charsRead < 0)
             error(1, "ERROR reading from socket");
     }
-
     result[len] = '\0';
     return result;
 }
@@ -94,11 +90,10 @@ char* receive(int connectionSocket) {
 void verifyClient(int connectionSocket) {
     char client[4], server[4] = "enc";
     memset(client, '\0', sizeof(client));
-
     // Receives a message up to 4 bytes from the client through the socket
     if (recv(connectionSocket, client, sizeof(client), 0) < 0)
         error(1, "ERROR reading from socket");
-    // Sneds back to client 
+    // Sends back to client 
     // Handshake message to verify client
     if (send(connectionSocket, server, sizeof(server), 0) < 0)
         error(1, "ERROR writing to socket");
@@ -152,7 +147,7 @@ void otpEncryption(int connectionSocket) {
     free(key);
     close(connectionSocket);
 }
-// For port
+
 // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397 
 int main(int argc, const char * argv[]) {
     // Checks if the user provided a port number 
@@ -164,21 +159,23 @@ int main(int argc, const char * argv[]) {
     int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket < 0)
         error(1, "Error opening socket");
-
     // From server.c
     struct sockaddr_in serverAddress, clientAddress;
     socklen_t sizeOfClientInfo = sizeof(clientAddress);
+    // Set up the address struct for the server socket
     setupAddressStruct(&serverAddress, atoi(argv[1]));
-
+    // Associate the socket to the port
     if (bind(listenSocket, 
          (struct sockaddr *)&serverAddress, 
          sizeof(serverAddress)) < 0){
     error(1, "ERROR on binding");
 }
-
+    // Start listening for connections
+    // Allow up to 5 connections to queue up
     listen(listenSocket, 5);
-
+    // Accept a connection, blocking if one is not available until one connects 
     while (1) {
+        // Accept the connection request which creates a connection socket
         int connectionSocket = accept(listenSocket, 
             (struct sockaddr *)&clientAddress, 
             &sizeOfClientInfo);
@@ -195,10 +192,11 @@ int main(int argc, const char * argv[]) {
                 otpEncryption(connectionSocket);
                 exit(0);
             default:
+                // Close the connection socket for this client 
                 close(connectionSocket);
         }
     }
-
+    // Closing the listening socket
     close(listenSocket);
     return 0;
 }
