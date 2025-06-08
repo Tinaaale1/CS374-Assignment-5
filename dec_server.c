@@ -219,5 +219,7 @@ int main(int argc, const char * argv[]) {
         default:
             // Parent closes the connected socket
             close(connectionSocket);
+    }    
     }
+    return 0;
 }
