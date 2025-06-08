@@ -2,39 +2,31 @@
 #include <stdlib.h>
 #include <time.h>
 
-/**
- * @brief Generates a random key composed of uppercase letters and spaces.
- *
- * The key length is provided as a command line argument.
- * Outputs the generated key followed by a newline to stdout.
- *
- * @param argc Number of command line arguments.
- * @param argv Command line arguments array.
- * @return 0 on success, 1 on error.
- */
 int main(int argc, char *argv[]) {
+    // Checks whether exactly one argument, program name was provided 
     if (argc != 2) {
         fprintf(stderr, "Usage: %s keylength\n", argv[0]);
         return 1;
     }
-
+    // Converts the input string to an integer and store it in keyLength
     int keyLength = atoi(argv[1]);
     if (keyLength <= 0) {
         fprintf(stderr, "Error: keylength must be a positive integer.\n");
         return 1;
     }
-
-    // Seed the random number generator once
+    // Initializes the random number generator used by rand()
     srand((unsigned int)time(NULL));
-
+    // Defines a string of valid characters for the key
     const char charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
-    int charsetSize = sizeof(charset) - 1; // exclude null terminator
+    // Total number of bytes in the array and null terminator 
+    int charsetSize = sizeof(charset) - 1; 
 
     for (int i = 0; i < keyLength; i++) {
         int index = rand() % charsetSize;
-        putchar(charset[index]);
-    }
-    putchar('\n');
+        // Prints a single character from the the charset array at the randomly selected index
+        printf("%c", charset[index]);
 
+    }
+    printf("\n");
     return 0;
 }
