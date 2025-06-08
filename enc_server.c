@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define BUFFER_SIZE 1000
+#define BUFFER_CAPACITY 1000
 
 // From server.c
 // Print formatted error message and exit with status code 
@@ -45,10 +45,10 @@ void sendData(int connectionSocket, char* data) {
     while (totalSent < len) {
         // Determine how many bytes to send
         int bytesToSend;
-            if (len - totalSent < BUFFER_SIZE) {
+            if (len - totalSent < BUFFER_CAPACITY) {
                 bytesToSend = len - totalSent;
             } else {
-                bytesToSend = BUFFER_SIZE;
+                bytesToSend = BUFFER_CAPACITY;
             }
         // Send message through the socket
         charsWritten = send(connectionSocket, data + totalSent, bytesToSend, 0);
@@ -79,10 +79,10 @@ char* receiveData(int connectionSocket) {
     // Loop until all expected bytes are received
     while (totalRead < len) {
         int bytesToRead;
-        if (len - totalRead < BUFFER_SIZE) {
+        if (len - totalRead < BUFFER_CAPACITY) {
             bytesToRead = len - totalRead;
         } else {
-            bytesToRead = BUFFER_SIZE;
+            bytesToRead = BUFFER_CAPACITY;
         }
         charsRead = recv(connectionSocket, result + totalRead, bytesToRead, 0);
         if (charsRead < 0) {
@@ -221,4 +221,3 @@ int main(int argc, const char * argv[]) {
     // Closing the listening socket
     close(listenSocket);
     return 0;
-}
