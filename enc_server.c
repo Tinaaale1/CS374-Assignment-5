@@ -28,6 +28,7 @@ void setupAddressStruct(struct sockaddr_in* address, int portNumber){
     address->sin_addr.s_addr = INADDR_ANY;
 }
 
+// Code adapted from the code in Server Program section
 // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
 void sendData(int connectionSocket, char* data) {
     // Calculate the number of characters 
@@ -59,59 +60,74 @@ void sendData(int connectionSocket, char* data) {
     }
 }
 
+// Code adapted from the code in Server Program section
 // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
-char* receive(int connectionSocket) {
+char* receiveData(int connectionSocket) {
     int len;
-    // Calls recv() to read data from the socket
-    // If negative value then error occurred
-    if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
-        error(1, "CLIENT: ERROR reading from socket");
-    // Allocate memory to store incoming messsage
-    char* result = malloc(len + 1);
-    if (!result)
-        error(1, "Unable to allocate memory");
-    int charsRead;
-    // Loop to read data for entire message
-    for (int i = 0; i < len; i += charsRead) {
-        int totalRead;
-        if (len - i > BUFFER_SIZE - 1) {
-            totalRead = BUFFER_SIZE - 1;
-        } else {
-            totalRead = len - i;
-        }
-        charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
-        if (charsRead < 0)
-            error(1, "ERROR reading from socket");
+    // Receive the length of the incoming message
+    int charsRead = recv(connectionSocket, &len, sizeof(len), 0);
+    if (charsRead < 0) {
+        error(1, "CLIENT: ERROR reading message length from socket");
     }
-    result[len] = '\0';
+    // Allocate memory for the message (+1 for null terminator)
+    char* result = malloc(len + 1);
+    if (!result) {
+        error(1, "CLIENT: ERROR allocating memory");
+    }
+    // Track how many bytes have been read
+    int totalRead = 0;
+    // Loop until all expected bytes are received
+    while (totalRead < len) {
+        int bytesToRead;
+        if (len - totalRead < BUFFER_SIZE) {
+            bytesToRead = len - totalRead;
+        } else {
+            bytesToRead = BUFFER_SIZE;
+        }
+        charsRead = recv(connectionSocket, result + totalRead, bytesToRead, 0);
+        if (charsRead < 0) {
+            error(1, "CLIENT: ERROR reading from socket");
+        }
+        // Updates how many bytes were successfully read
+        totalRead += charsRead;
+    }
+    result[len] = '\0'; 
     return result;
 }
 
+// Adapted code for the validation logic 
+// https://github.com/CS-344-nilsstreedain/program4/blob/main/enc_server.c
 // Verify the client 
 void verifyClient(int connectionSocket) {
     char client[4], server[4] = "enc";
     memset(client, '\0', sizeof(client));
     // Receives a message up to 4 bytes from the client through the socket
-    if (recv(connectionSocket, client, sizeof(client), 0) < 0)
-        error(1, "ERROR reading from socket");
+    int charsRead = recv(connectionSocket, client, sizeof(client), 0);
+    if (charsRead < 0){
+        error(1, "CLIENT: ERROR reading from socket");
+    }
     // Sends back to client 
     // Handshake message to verify client
-    if (send(connectionSocket, server, sizeof(server), 0) < 0)
-        error(1, "ERROR writing to socket");
+    int charsWritten = send(connectionSocket, server, sizeof(server), 0);
+    if (charsWritten < 0) {
+        error(1, "CLIENT: ERROR writing to socket");
+    }
     // Compares the received client string to the expected "enc" string 
-    if (strcmp(client, server)) {
+    if (strcmp(client, server) != 0) {
         // If strings do not match, close socket
         close(connectionSocket);
-        error(2, "Rejected connection: Client not validated");
+        error(2, "CLIENT: Rejected connection: Client not validated");
     }
 }
-
+// https://en.wikipedia.org/wiki/One-time_pad
+// After verifying the connection to enc_server is coming from enc_client
+// Then this child receives plaintext and a key from enc_client via the connected socket
 void otpEncryption(int connectionSocket) {
     // Read a plaintext message from the client
-    char* plaintext = receive(connectionSocket);
-    char* key = receive(connectionSocket);
+    char* plaintext = receiveData(connectionSocket);
+    char* key = receiveData(connectionSocket);
     // Calculates the length of the plaintext message
-    // Key is the same length  
+    // Key pased in must be at least as big as the plaintext  
     int len = (int)strlen(plaintext);
     char* result = (char*) malloc(len + 1);
 
@@ -124,19 +140,19 @@ void otpEncryption(int connectionSocket) {
             text = plaintext[i] - 'A';
         }
         // Converts the character into a number between 0 and 26
-        int keyVal;
+        int keyValue;
         if (key[i] == ' ') {
-            keyVal = 26;
+            keyValue = 26;
         } else {
-            keyVal = key[i] - 'A';
+            keyValue = key[i] - 'A';
         }
         // Wrap around if the result is over 26
-        int encryptVal = (text + keyVal) % 27;
+        int encryptValue = (text + keyValue) % 27;
         // If 26 then result is a space
-        if (encryptVal == 26) {
+        if (encryptValue == 26) {
             result[i] = ' ';
         } else {
-            result[i] = encryptVal + 'A';
+            result[i] = encryptValue + 'A';
         }
     }
     // Adds a null terminator to the end of the encrypted string
@@ -156,11 +172,11 @@ int main(int argc, const char * argv[]) {
         fprintf(stderr, "USAGE: %s port\n", argv[0]);
         exit(1);
     }
-    // Create a socket
+    // From server.c
+    // Create the socket that will listen for connections
     int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket < 0)
-        error(1, "Error opening socket");
-    // From server.c
+        error(1, "ERROR opening socket");
     struct sockaddr_in serverAddress, clientAddress;
     socklen_t sizeOfClientInfo = sizeof(clientAddress);
     // Set up the address struct for the server socket
@@ -170,7 +186,8 @@ int main(int argc, const char * argv[]) {
          (struct sockaddr *)&serverAddress, 
          sizeof(serverAddress)) < 0){
     error(1, "ERROR on binding");
-}
+}   
+    // enc_server must support up to 5 concurrent socket connections running at the same time
     // Start listening for connections
     // Allow up to 5 connections to queue up
     listen(listenSocket, 5);
@@ -182,14 +199,18 @@ int main(int argc, const char * argv[]) {
             &sizeOfClientInfo);
         if (connectionSocket < 0)
             error(1, "ERROR on accept");
-
-        int pid = fork();
-        switch (pid) {
+        // Adapted from example code
+        // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
+        // Fork a child process
+        int spawnpid = fork();
+        switch (spawnpid) {
             case -1:
-                error(1, "Unable to fork child");
+                error(1, "Fork failed");
                 break;
             case 0:
+                // Validate the client type
                 verifyClient(connectionSocket);
+                // Handle the encryption
                 otpEncryption(connectionSocket);
                 exit(0);
             default:
