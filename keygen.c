@@ -16,7 +16,7 @@ int main(int argc, char *argv[]) {
     }
     // Initializes the random number generator used by rand()
     srand((unsigned int)time(NULL));
-    // Defines a string of valid characters for the key
+    // The characters in the file generated will be any of the 27 allowed characters
     const char charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
     // Total number of bytes in the array and null terminator 
     int charsetSize = sizeof(charset) - 1; 
