@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/wait.h> // For waitpid()
 
 #define BUFFER_CAPACITY 1000
 
@@ -193,27 +194,30 @@ int main(int argc, const char * argv[]) {
     listen(listenSocket, 5);
     // Accept a connection, blocking if one is not available until one connects
     while (1) {
-        int connectionSocket = accept(listenSocket, 
-            (struct sockaddr *)&clientAddress, 
-            &sizeOfClientInfo);
-        if (connectionSocket < 0)
-            error(1, "ERROR on accept");
-        // Adapted from example code
-        // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
-        // Fork a child process
-        int pid = fork();
-        switch (pid) {
-            case -1:
-                error(1, "Unable to fork child");
-                break;
-            case 0:
-                verifyClient(connectionSocket);
-                otpDecryption(connectionSocket);
-                exit(0);
-            default:
-                close(connectionSocket);
-        }
+        // Clean up any terminated child processes
+    // Use waitpid with WNOHANG to avoid blocking
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+
+    // Accept a new connection
+    int connectionSocket = accept(listenSocket, 
+        (struct sockaddr *)&clientAddress, 
+        &sizeOfClientInfo);
+    if (connectionSocket < 0)
+        error(1, "ERROR on accept");
+
+    // Fork a child process
+    int pid = fork();
+    switch (pid) {
+        case -1:
+            error(1, "Unable to fork child");
+            break;
+        case 0:
+            // Child process handles decryption
+            verifyClient(connectionSocket);
+            otpDecryption(connectionSocket);
+            exit(0);
+        default:
+            // Parent closes the connected socket
+            close(connectionSocket);
     }
-    close(listenSocket);
-    return 0;
 }
