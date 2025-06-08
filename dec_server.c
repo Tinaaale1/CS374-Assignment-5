@@ -190,13 +190,16 @@ int main(int argc, const char * argv[]) {
          sizeof(serverAddress)) < 0){
     error(1, "ERROR on binding");
 }
+    // From server.c
     // Start lisenting for connection
     // Allow up to 5 connections to queue up
     listen(listenSocket, 5);
     // Accept a connection, blocking if one is not available until one connects
     while (1) {
-        // Clean up any terminated child processes
-    // Use waitpid with WNOHANG to avoid blocking
+    // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
+    // Checks for any child process that has exited
+    // WNOHANG specified. If the child hasn't termianted,
+    // waitpid will immediately return the value 0
     while (waitpid(-1, NULL, WNOHANG) > 0);
 
     // Accept a new connection
@@ -205,20 +208,21 @@ int main(int argc, const char * argv[]) {
         &sizeOfClientInfo);
     if (connectionSocket < 0)
         error(1, "ERROR on accept");
-
+    // Adapted from example code
+    // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
     // Fork a child process
-    int pid = fork();
-    switch (pid) {
+    int spawnpid = fork();
+    switch (spawnpid) {
         case -1:
-            error(1, "Unable to fork child");
+            error(1, "Forked failed");
             break;
         case 0:
-            // Child process handles decryption
+            // Child process 
             verifyClient(connectionSocket);
             otpDecryption(connectionSocket);
             exit(0);
         default:
-            // Parent closes the connected socket
+            // Parent process
             close(connectionSocket);
     }    
     }
