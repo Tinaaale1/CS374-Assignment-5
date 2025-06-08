@@ -192,20 +192,21 @@ int main(int argc, const char * argv[]) {
          sizeof(serverAddress)) < 0){
     error(1, "ERROR on binding");
 }   
-
+    // From server.c
     // Start listening for connections
     listen(listenSocket, 5);
-
-    // Track the number of active children
+    // Tracks the number of active child processes 
     int childCount = 0;
-
     while (1) {
-        // Reap any finished children (non-blocking)
+        // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
+        // Checks for any child process that has exited
+        // WNOHANG specified. If the child hasn't termianted,
+        // waitpid will immediately return the value 0
         while (waitpid(-1, NULL, WNOHANG) > 0) {
-            childCount--;
+            childCount = childCount -1;
         }
 
-        // Only accept if we have fewer than 5 children
+        // Accept new copnnections if the current number of child processes is less than 5
         if (childCount < MAX_CHILDREN) {
             int connectionSocket = accept(listenSocket, 
                 (struct sockaddr *)&clientAddress, 
@@ -213,7 +214,9 @@ int main(int argc, const char * argv[]) {
             if (connectionSocket < 0) {
                 error(1, "ERROR on accept");
             }
-
+            // Adapted from example code
+            // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
+            // Fork a child process
             int spawnpid = fork();
             switch (spawnpid) {
                 case -1:
@@ -226,7 +229,7 @@ int main(int argc, const char * argv[]) {
                     exit(0);
                 default:
                     // Parent process
-                    childCount++;
+                    childCount = childCount + 1;
                     close(connectionSocket);
             }
         }
