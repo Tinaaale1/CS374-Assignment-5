@@ -6,9 +6,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define BUFFER_SIZE 1000
+#define BUFFER_CAPACITY 1000
 
-
+// Functions exactly like enc_server but will decrypt ciphertext
+// From server.c
 // Print formatted error message and exit with status code 
 void error(int exitCode, const char *message) {
     fprintf(stderr, "Client error: %s\n", message);
@@ -28,6 +29,7 @@ void setupAddressStruct(struct sockaddr_in* address, int portNumber){
     address->sin_addr.s_addr = INADDR_ANY;
 }
 
+// Code adapted from the code in Server Program section
 // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
 void sendData(int connectionSocket, char* data) {
     // Calculate the number of characters 
@@ -44,10 +46,10 @@ void sendData(int connectionSocket, char* data) {
     while (totalSent < len) {
         // Determine how many bytes to send
         int bytesToSend;
-            if (len - totalSent < BUFFER_SIZE) {
+            if (len - totalSent < BUFFER_CAPACITY) {
                 bytesToSend = len - totalSent;
             } else {
-                bytesToSend = BUFFER_SIZE;
+                bytesToSend = BUFFER_CAPACITY;
             }
         // Send message through the socket
         charsWritten = send(connectionSocket, data + totalSent, bytesToSend, 0);
@@ -59,45 +61,59 @@ void sendData(int connectionSocket, char* data) {
     }
 }
 
+// Code adapted from the code in Server Program section
 // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
-char* receive(int connectionSocket) {
+char* receiveData(int connectionSocket) {
     int len;
     // Calls recv() to read data from the socket
+    int charsRead = recv(connectionSocket, &len, sizeof(len), 0);
     // If negative value then error occurred
-    if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
-        error(1, "CLIENT: ERROR reading from socket");
-    // Allocate memory to store incoming messsage
-    char* result = malloc(len + 1);
-    if (!result)
-        error(1, "Unable to allocate memory");
-    int charsRead;
-    // Loop to read data for entire message
-    for (int i = 0; i < len; i += charsRead) {
-        int totalRead;
-        if (len - i > BUFFER_SIZE - 1) {
-            totalRead = BUFFER_SIZE - 1;
-        } else {
-            totalRead = len - i;
-        }
-        charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
-        if (charsRead < 0)
-            error(1, "ERROR reading from socket");
+    if (charsRead < 0) {
+        error(1, "CLIENT: ERROR reading message length from socket");
     }
-    result[len] = '\0';
+     // Allocate memory for the message (+1 for null terminator)
+    char* result = malloc(len + 1);
+    if (!result) {
+        error(1, "CLIENT: ERROR allocating memory");
+    }
+    // Track how many bytes have been read
+    int totalRead = 0;
+    // Loop until all expected bytes are received
+    while (totalRead < len) {
+        int bytesToRead;
+        if (len - totalRead < BUFFER_CAPACITY) {
+            bytesToRead = len - totalRead;
+        } else {
+            bytesToRead = BUFFER_CAPACITY;
+        }
+        charsRead = recv(connectionSocket, result + totalRead, bytesToRead, 0);
+        if (charsRead < 0) {
+            error(1, "CLIENT: ERROR reading from socket");
+        }
+        // Updates how many bytes were successfully read
+        totalRead += charsRead;
+    }
+    result[len] = '\0'; 
     return result;
 }
 
+// Adapted code for the validation logic 
+// https://github.com/CS-344-nilsstreedain/program4/blob/main/enc_server.c
 // Verify the client 
 void verifyClient(int connectionSocket) {
     char client[4], server[4] = "dec";
     memset(client, '\0', sizeof(client));
     // Receives a message up to 4 bytes from the client through the socket
-    if (recv(connectionSocket, client, sizeof(client), 0) < 0)
-        error(1, "ERROR reading from socket");
-    // Sends back to client
+    int charsRead = recv(connectionSocket, client, sizeof(client), 0);
+    if (charsRead < 0){
+        error(1, "CLIENT: ERROR reading from socket");
+    }
+    // Sends back to client 
     // Handshake message to verify client
-    if (send(connectionSocket, server, sizeof(server), 0) < 0)
-        error(1, "ERROR writing to socket");
+    int charsWritten = send(connectionSocket, server, sizeof(server), 0);
+    if (charsWritten < 0) {
+        error(1, "CLIENT: ERROR writing to socket");
+    }
     // Compares the received client string to the expected "dec" string
     if (strcmp(client, server)) {
         // If strings do not match, close socket
@@ -106,10 +122,11 @@ void verifyClient(int connectionSocket) {
     }
 }
 
+// https://en.wikipedia.org/wiki/One-time_pad
 void otpDecryption(int connectionSocket) {
     // Read a plaintext message from the client
-    char* plaintext = receive(connectionSocket);
-    char* key = receive(connectionSocket);
+    char* plaintext = receiveData(connectionSocket);
+    char* key = receiveData(connectionSocket);
     // Calculates the length of the plaintext message
     // Key is the same length
     int len = (int)strlen(plaintext);
@@ -156,11 +173,11 @@ int main(int argc, const char * argv[]) {
         fprintf(stderr, "USAGE: %s port\n", argv[0]);
         exit(1);
     }
+    // From server.c
     // Create a socket
     int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket < 0)
         error(1, "Error opening socket");
-    // From server.c
     struct sockaddr_in serverAddress, clientAddress;
     socklen_t sizeOfClientInfo = sizeof(clientAddress);
     // Set up the address struct for the server socket
@@ -181,7 +198,9 @@ int main(int argc, const char * argv[]) {
             &sizeOfClientInfo);
         if (connectionSocket < 0)
             error(1, "ERROR on accept");
-
+        // Adapted from example code
+        // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
+        // Fork a child process
         int pid = fork();
         switch (pid) {
             case -1:
