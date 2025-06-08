@@ -190,38 +190,45 @@ int main(int argc, const char * argv[]) {
     error(1, "ERROR on binding");
 }   
 
-    // enc_server must support up to 5 concurrent socket connections running at the same time
     // Start listening for connections
-    // Allow up to 5 connections to queue up
     listen(listenSocket, 5);
-    // Accept a connection, blocking if one is not available until one connects 
+
+    // Track the number of active children
+    int childCount = 0;
+
     while (1) {
-        // Accept the connection request which creates a connection socket
-        int connectionSocket = accept(listenSocket, 
-            (struct sockaddr *)&clientAddress, 
-            &sizeOfClientInfo);
-        if (connectionSocket < 0)
-            error(1, "ERROR on accept");
-        // Adapted from example code
-        // https://canvas.oregonstate.edu/courses/1999732/pages/exploration-process-api-monitoring-child-processes?module_item_id=25329381
-        // Fork a child process
-        int spawnpid = fork();
-        switch (spawnpid) {
-            case -1:
-                error(1, "Fork failed");
-                break;
-            case 0:
-                // Validate the client type
-                verifyClient(connectionSocket);
-                // Handle the encryption
-                otpEncryption(connectionSocket);
-                exit(0);
-            default:
-                // Close the connection socket for this client 
-                close(connectionSocket);
+        // Reap any finished children (non-blocking)
+        while (waitpid(-1, NULL, WNOHANG) > 0) {
+            childCount--;
+        }
+
+        // Only accept if we have fewer than 5 children
+        if (childCount < MAX_CHILDREN) {
+            int connectionSocket = accept(listenSocket, 
+                (struct sockaddr *)&clientAddress, 
+                &sizeOfClientInfo);
+            if (connectionSocket < 0) {
+                error(1, "ERROR on accept");
+            }
+
+            int spawnpid = fork();
+            switch (spawnpid) {
+                case -1:
+                    error(1, "Fork failed");
+                    break;
+                case 0:
+                    // Child process
+                    verifyClient(connectionSocket);
+                    otpEncryption(connectionSocket);
+                    exit(0);
+                default:
+                    // Parent process
+                    childCount++;
+                    close(connectionSocket);
+            }
         }
     }
-    // Closing the listening socket
+
     close(listenSocket);
     return 0;
 }
