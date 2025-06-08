@@ -1,17 +1,21 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <stdarg.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <sys/types.h>
-#include <sys/socket.h>
+#include <string.h>
+#include <sys/types.h>  // ssize_t
+#include <sys/socket.h> // send(),recv()
+#include <netdb.h>      // gethostbyname()
+
+/**
+* Client code
+* 1. Create a socket and connect to the server specified in the command arugments.
+* 2. Prompt the user for input and send that input as a message to the server.
+* 3. Print the message received from the server and exit the program.
+*/
 
 #define BUFFER_SIZE 1000
 
 // Print formatted error message and exit with status code +
-
 void error(int exitCode, const char *message) {
     fprintf(stderr, "Client error: %s\n", message);
     exit(exitCode);
@@ -38,23 +42,22 @@ void setupAddressStruct(struct sockaddr_in* address,
         hostInfo->h_length);
 }
 
-// Functions a file path adn returns the contents of the file as a string
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
+// Functions reads a file path and returns the contents of the file as a string
 char* loadFile(const char* filepath) {
     // Open file in read mode 
     FILE* f = fopen(filepath, "r");
     if (!f)
         error(1, "Cannot open file");
-
-    size_t capacity = 1024;
+    ssize_t capacity = 1024;
     // Track how many characters have been read
-    size_t length = 0;
+    ssize_t length = 0;
     // Allocates capcity bytes for the data buffer 
     char* data = malloc(capacity);
     if (!data) {
         fclose(f);
         error(1, "Memory allocation failed");
     }
-
     int ch;
     // Read one character at a time from file until end of file
     while ((ch = fgetc(f)) != EOF) {
@@ -68,11 +71,9 @@ char* loadFile(const char* filepath) {
             fclose(f);
             error(1, "Invalid character in file");
         }
-
         // Skip newline characters 
         if (isNewline) 
             continue;
-
         // Checks if there is enough space to store more characters
         if (length + 1 >= capacity) {
             // Double capacity for more characters
@@ -91,18 +92,17 @@ char* loadFile(const char* filepath) {
         // Increment length by 1 for the next character
         length++;
     }
-
     // Adds the null terminator the end of the string stored
     data[length] = '\0';
-
     fclose(f);
     return data;
 }
+
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
 void sendData(int connectionSocket, char* data) {
     // Calculate the number of characters 
     int len = strlen(data);
     // Sends the length of the data  
-    // If negative, error occurred 
     int charsWritten = send(connectionSocket, &len, sizeof(len), 0);
     // If negative, error occurred 
     if (charsWritten < 0) {
@@ -127,19 +127,18 @@ void sendData(int connectionSocket, char* data) {
         totalSent += charsWritten;
     }
 }
+
+// https://canvas.oregonstate.edu/courses/1999732/pages/exploration-client-server-communication-via-sockets?module_item_id=25329397
 char* receive(int connectionSocket) {
     int len;
     // Calls recv() to read data from the socket
     // If negative value then error occurred
     if (recv(connectionSocket, &len, sizeof(len), 0) < 0)
         error(1, "CLIENT: ERROR reading from socket");
-    
-
     // Allocate memory to store incoming messsage
     char* result = malloc(len + 1);
     if (!result)
         error(1, "Unable to allocate memory");
-
     int charsRead;
     // Loop to read data for entire message
     for (int i = 0; i < len; i += charsRead) {
@@ -149,16 +148,15 @@ char* receive(int connectionSocket) {
         } else {
             totalRead = len - i;
         }
-
         charsRead = (int)recv(connectionSocket, result + i, totalRead, 0);
         if (charsRead < 0)
             error(1, "ERROR reading from socket");
     }
-
     result[len] = '\0';
     return result;
 }
 
+// Verify the server
 // Takes a socket descriptor that represents the network connection
 void verifyServer(int connectionSocket) {
     // Hanshake identifier 
@@ -186,10 +184,8 @@ int main(int argc, const char* argv[]) {
     char* plaintext = loadFile(argv[1]);
     // Calls loadFile() to read the key file
     char* key = loadFile(argv[2]);
-
     if (strlen(key) < strlen(plaintext))
         error(1, "Key is shorter than plaintext");
-
     // Create the socket that will listen for connections
     socketFD = socket(AF_INET, SOCK_STREAM, 0); 
     if (socketFD < 0){
@@ -198,13 +194,11 @@ int main(int argc, const char* argv[]) {
     struct sockaddr_in serverAddress;
     // Set up the server address struct 
     setupAddressStruct(&serverAddress, atoi(argv[3]), "localhost");
-    
     // Connect to the server
     if (connect(socketFD, 
         (struct sockaddr*)&serverAddress, 
         sizeof(serverAddress)) < 0)
         error(1, "CLIENT: ERROR connecting");
-
     verifyServer(socketFD);
     sendData(socketFD, plaintext);
     sendData(socketFD, key);
