@@ -5,8 +5,11 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/wait.h>
+
 
 #define BUFFER_CAPACITY 1000
+#define MAX_CHILDREN 5
 
 // From server.c
 // Print formatted error message and exit with status code 
